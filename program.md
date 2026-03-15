@@ -41,7 +41,7 @@ Each experiment runs cross-validation across 5 folds with a **fixed time budget 
 
 **What you CANNOT do:**
 - Modify `prepare.py` or `modal_run.py`. They are read-only.
-- Install new packages or add dependencies. You can only use what's already in the Modal image (torch, numpy, pandas, scipy, scikit-learn).
+- Install new packages or add dependencies. You can only use what's already in the Modal image (torch, numpy, pandas, scipy, scikit-learn, transformers, fair-esm, xgboost, lightgbm).
 - Modify the evaluation function. The `evaluate()` function in `prepare.py` is the ground truth metric.
 
 **The goal is simple: get the highest mean_spearman.** Everything is fair game within train.py. You have a GPU available — use it. Don't be afraid of expensive approaches.

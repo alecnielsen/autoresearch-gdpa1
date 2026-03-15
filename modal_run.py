@@ -13,7 +13,10 @@ import modal
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
-    .pip_install("torch", "numpy", "pandas", "scipy", "scikit-learn")
+    .pip_install(
+        "torch", "numpy", "pandas", "scipy", "scikit-learn",
+        "transformers", "fair-esm", "xgboost", "lightgbm",
+    )
     .add_local_file("train.py", "/root/train.py")
     .add_local_file("prepare.py", "/root/prepare.py")
     .add_local_dir("data", "/root/data")
