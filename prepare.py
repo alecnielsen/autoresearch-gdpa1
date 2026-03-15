@@ -27,7 +27,7 @@ from scipy.stats import spearmanr
 TARGET_COLS = ["HIC", "Tm2", "PR_CHO", "AC-SINS_pH7.4", "Titer"]
 FOLD_COL = "hierarchical_cluster_fold"
 N_FOLDS = 5
-TIME_BUDGET = 300  # training time budget in seconds (5 minutes per experiment)
+TIME_BUDGET = 3600  # training time budget in seconds (1 hour per experiment)
 
 # Sequence encoding constants
 AMINO_ACIDS = "ACDEFGHIKLMNPQRSTVWY"  # 20 standard amino acids

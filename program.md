@@ -33,7 +33,7 @@ Once you get confirmation, kick off the experimentation.
 
 ## Experimentation
 
-Each experiment runs cross-validation across 5 folds with a **fixed time budget of 5 minutes** (wall clock). You launch it as: `uv run train.py`.
+Each experiment runs cross-validation across 5 folds with a **fixed time budget of 1 hour** (wall clock). You launch it as: `uv run train.py`. Simple models will finish much faster — the budget exists so you can try expensive approaches (protein language model fine-tuning, large ensembles, extensive hyperparameter searches, etc.) without worrying about timeouts.
 
 **What you CAN do:**
 - Modify `train.py` — this is the only file you edit. Everything is fair game: model architecture, features (you can use other sequence columns from the CSV), training procedure, hyperparameters, regularization, ensembling, feature engineering, etc.
@@ -43,7 +43,7 @@ Each experiment runs cross-validation across 5 folds with a **fixed time budget 
 - Install new packages or add dependencies. You can only use what's already in `pyproject.toml` (torch, numpy, pandas, scipy, etc.).
 - Modify the evaluation function. The `evaluate()` function in `prepare.py` is the ground truth metric.
 
-**The goal is simple: get the highest mean_spearman.** Since the time budget is fixed, you don't need to worry about training time — it's always 5 minutes. Everything is fair game within train.py.
+**The goal is simple: get the highest mean_spearman.** Everything is fair game within train.py. You have a GPU available — use it. Don't be afraid of expensive approaches.
 
 **Key domain context for ideas:**
 - AHo numbering aligns CDR and framework positions across antibodies. CDR positions are the most variable and often most predictive.
@@ -123,17 +123,19 @@ LOOP FOREVER:
 
 The idea is that you are a completely autonomous researcher trying things out. If they work, keep. If they don't, discard. And you're advancing the branch so that you can iterate.
 
-**Timeout**: Each experiment should take ~5 minutes total. If a run exceeds 10 minutes, kill it and treat it as a failure (discard and revert).
+**Timeout**: Each experiment has up to 1 hour. If a run exceeds 75 minutes, kill it and treat it as a failure (discard and revert).
 
 **Crashes**: If a run crashes, use your judgment: If it's something dumb and easy to fix (e.g. a typo, a missing import), fix it and re-run. If the idea itself is fundamentally broken, just skip it, log "crash" as the status in the tsv, and move on.
 
 **NEVER STOP**: Once the experiment loop has begun (after the initial setup), do NOT pause to ask the human if you should continue. Do NOT ask "should I keep going?" or "is this a good stopping point?". The human might be asleep, or gone from a computer and expects you to continue working *indefinitely* until you are manually stopped. You are autonomous. If you run out of ideas, think harder — try combining previous near-misses, try more radical approaches, try feature engineering ideas from the domain context above. The loop runs until the human interrupts you, period.
 
 **Ideas to explore** (non-exhaustive):
+- Protein language models: fine-tune ESM-2 (esm2_t33_650M_UR50D or smaller variants), extract embeddings as features
 - Feature engineering: physicochemical properties per position, k-mer features, CDR vs framework distinction
 - Alternative encodings: learned embeddings, BLOSUM62-based features, AAindex properties
-- Model architectures: Ridge/Lasso regression, random forests, gradient boosting, CNN on sequence, attention over positions
+- Model architectures: Ridge/Lasso regression, random forests, gradient boosting (XGBoost/LightGBM), CNN on sequence, attention/transformer over positions
 - Regularization: stronger dropout, weight decay, early stopping tuning, data augmentation
 - Multi-task strategies: shared vs separate encoders, task weighting, curriculum
-- Ensemble methods: bagging, blending fold models
+- Ensemble methods: bagging, blending fold models, stacking
 - Using additional sequence information from CSV (full HC/LC, DNA sequences)
+- Transfer learning from related protein property prediction tasks
