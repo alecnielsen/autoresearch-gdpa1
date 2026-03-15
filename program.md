@@ -25,6 +25,7 @@ To set up a new experiment, work with the user to:
    - `program.md` — this file, your instructions.
    - `prepare.py` — fixed constants, data loading, sequence encoding, evaluation. **Do not modify.**
    - `train.py` — the file you modify. Model, features, training loop, hyperparameters.
+   - `modal_run.py` — runs train.py on a remote H100 GPU via Modal. **Do not modify.**
 4. **Verify data exists**: Check that `data/GDPa1.csv` exists.
 5. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run.
 6. **Confirm and go**: Confirm setup looks good.
@@ -39,8 +40,8 @@ Each experiment runs cross-validation across 5 folds with a **fixed time budget 
 - Modify `train.py` — this is the only file you edit. Everything is fair game: model architecture, features (you can use other sequence columns from the CSV), training procedure, hyperparameters, regularization, ensembling, feature engineering, etc.
 
 **What you CANNOT do:**
-- Modify `prepare.py`. It is read-only. It contains the fixed evaluation metric, data loading, sequence encoding, and constants.
-- Install new packages or add dependencies. You can only use what's already in `pyproject.toml` (torch, numpy, pandas, scipy, etc.).
+- Modify `prepare.py` or `modal_run.py`. They are read-only.
+- Install new packages or add dependencies. You can only use what's already in the Modal image (torch, numpy, pandas, scipy, scikit-learn).
 - Modify the evaluation function. The `evaluate()` function in `prepare.py` is the ground truth metric.
 
 **The goal is simple: get the highest mean_spearman.** Everything is fair game within train.py. You have a GPU available — use it. Don't be afraid of expensive approaches.
@@ -114,7 +115,7 @@ LOOP FOREVER:
 1. Look at the git state: the current branch/commit we're on
 2. Tune `train.py` with an experimental idea by directly hacking the code.
 3. git commit
-4. Run the experiment: `uv run train.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
+4. Run the experiment: `modal run modal_run.py > run.log 2>&1` (this executes train.py on a remote H100 GPU via Modal — redirect everything, do NOT use tee or let output flood your context)
 5. Read out the results: `grep "^mean_spearman:\|^training_seconds:" run.log`
 6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up.
 7. Record the results in the tsv (NOTE: do not commit the results.tsv file, leave it untracked by git)

@@ -32,17 +32,20 @@ Three files that matter:
 
 ## Quick start
 
-**Requirements:** Python 3.10+, [uv](https://docs.astral.sh/uv/). GPU optional but recommended for heavier approaches (ESM fine-tuning, etc.).
+**Requirements:** Python 3.10+, [uv](https://docs.astral.sh/uv/), [Modal](https://modal.com/) account (for H100 GPU execution).
 
 ```bash
 # 1. Install dependencies
 uv sync
 
-# 2. Verify data and encoding (one-time sanity check)
+# 2. Authenticate with Modal (one-time)
+modal setup
+
+# 3. Verify data and encoding (one-time sanity check)
 uv run prepare.py
 
-# 3. Run a single training experiment
-uv run train.py
+# 4. Run a single training experiment on H100
+modal run modal_run.py
 ```
 
 ## Running the agent
@@ -60,6 +63,7 @@ The agent will establish a baseline, then autonomously iterate on `train.py` —
 ```
 prepare.py      — constants, data loading, encoding, evaluation (do not modify)
 train.py        — model + training loop (agent modifies this)
+modal_run.py    — runs train.py on Modal H100 GPU (do not modify)
 program.md      — agent instructions
 data/GDPa1.csv  — dataset (246 antibodies, 5 targets)
 pyproject.toml  — dependencies
