@@ -1,223 +1,159 @@
 """
-Antibody developability prediction — baseline model.
-Multi-task MLP on one-hot encoded AHo-aligned sequences.
+Antibody developability prediction — Ridge regression with physicochemical features.
 
 Usage: uv run train.py
 """
 
 import time
 import numpy as np
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import DataLoader, TensorDataset
+from sklearn.linear_model import RidgeCV
 
 from prepare import (
     load_data, encode_sequences, get_targets, get_fold_splits, evaluate,
     TARGET_COLS, N_FOLDS, TIME_BUDGET, ONEHOT_DIM,
+    AMINO_ACIDS, GAP_CHAR, SEQ_LEN_PER_CHAIN,
 )
 
 # ---------------------------------------------------------------------------
-# Model
+# Physicochemical properties per amino acid
 # ---------------------------------------------------------------------------
 
-class MultiTaskMLP(nn.Module):
-    """Simple multi-task MLP for antibody developability prediction."""
+# Kyte-Doolittle hydrophobicity
+HYDROPHOBICITY = {
+    'A': 1.8, 'C': 2.5, 'D': -3.5, 'E': -3.5, 'F': 2.8,
+    'G': -0.4, 'H': -3.2, 'I': 4.5, 'K': -3.9, 'L': 3.8,
+    'M': 1.9, 'N': -3.5, 'P': -1.6, 'Q': -3.5, 'R': -4.5,
+    'S': -0.8, 'T': -0.7, 'V': 4.2, 'W': -0.9, 'Y': -1.3,
+    '-': 0.0,
+}
 
-    def __init__(self, input_dim, hidden_dims, n_targets, dropout=0.1):
-        super().__init__()
-        layers = []
-        prev_dim = input_dim
-        for h_dim in hidden_dims:
-            layers.append(nn.Linear(prev_dim, h_dim))
-            layers.append(nn.ReLU())
-            layers.append(nn.Dropout(dropout))
-            prev_dim = h_dim
-        self.backbone = nn.Sequential(*layers)
-        self.head = nn.Linear(prev_dim, n_targets)
+# Molecular weight (Da)
+MOL_WEIGHT = {
+    'A': 89, 'C': 121, 'D': 133, 'E': 147, 'F': 165,
+    'G': 75, 'H': 155, 'I': 131, 'K': 146, 'L': 131,
+    'M': 149, 'N': 132, 'P': 115, 'Q': 146, 'R': 174,
+    'S': 105, 'T': 119, 'V': 117, 'W': 204, 'Y': 181,
+    '-': 0.0,
+}
 
-    def forward(self, x):
-        h = self.backbone(x)
-        return self.head(h)
+# Charge at pH 7
+CHARGE = {
+    'A': 0, 'C': 0, 'D': -1, 'E': -1, 'F': 0,
+    'G': 0, 'H': 0.1, 'I': 0, 'K': 1, 'L': 0,
+    'M': 0, 'N': 0, 'P': 0, 'Q': 0, 'R': 1,
+    'S': 0, 'T': 0, 'V': 0, 'W': 0, 'Y': 0,
+    '-': 0,
+}
 
-# ---------------------------------------------------------------------------
-# Hyperparameters
-# ---------------------------------------------------------------------------
+# Polarity (Grantham)
+POLARITY = {
+    'A': 8.1, 'C': 5.5, 'D': 13.0, 'E': 12.3, 'F': 5.2,
+    'G': 9.0, 'H': 10.4, 'I': 5.2, 'K': 11.3, 'L': 4.9,
+    'M': 5.7, 'N': 11.6, 'P': 8.0, 'Q': 10.5, 'R': 10.5,
+    'S': 9.2, 'T': 8.6, 'V': 5.9, 'W': 5.4, 'Y': 6.2,
+    '-': 0.0,
+}
 
-HIDDEN_DIMS = [512, 256]    # MLP hidden layer sizes
-DROPOUT = 0.1               # dropout rate
-LEARNING_RATE = 1e-3        # Adam learning rate
-WEIGHT_DECAY = 1e-4         # L2 regularization
-BATCH_SIZE = 32             # training batch size
-N_EPOCHS = 500              # max epochs (will stop early if time runs out)
+PROPERTY_DICTS = [HYDROPHOBICITY, MOL_WEIGHT, CHARGE, POLARITY]
+N_PROPERTIES = len(PROPERTY_DICTS)
+
+
+def encode_physicochemical(df):
+    """Encode sequences as per-position physicochemical properties."""
+    n = len(df)
+    n_feat = 2 * SEQ_LEN_PER_CHAIN * N_PROPERTIES  # 149 * 4 * 2 = 1192
+    X = np.zeros((n, n_feat), dtype=np.float32)
+
+    for i, (_, row) in enumerate(df.iterrows()):
+        for chain_idx, col in enumerate(["heavy_aligned_aho", "light_aligned_aho"]):
+            seq = row[col]
+            offset = chain_idx * SEQ_LEN_PER_CHAIN * N_PROPERTIES
+            for pos, aa in enumerate(seq):
+                for p, prop_dict in enumerate(PROPERTY_DICTS):
+                    feat_idx = offset + pos * N_PROPERTIES + p
+                    X[i, feat_idx] = prop_dict.get(aa, 0.0)
+    return X
+
+
+def encode_aa_composition(df):
+    """Encode amino acid composition (fraction of each AA in each chain)."""
+    alphabet = GAP_CHAR + AMINO_ACIDS  # 21 chars
+    n = len(df)
+    n_feat = 2 * len(alphabet)  # 42
+    X = np.zeros((n, n_feat), dtype=np.float32)
+
+    for i, (_, row) in enumerate(df.iterrows()):
+        for chain_idx, col in enumerate(["heavy_aligned_aho", "light_aligned_aho"]):
+            seq = row[col]
+            offset = chain_idx * len(alphabet)
+            for aa in seq:
+                idx = alphabet.find(aa)
+                if idx >= 0:
+                    X[i, offset + idx] += 1.0
+            # Normalize to fractions
+            X[i, offset:offset + len(alphabet)] /= max(len(seq), 1)
+    return X
+
 
 # ---------------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------------
 
-def train_one_fold(X_train, Y_train, X_val, Y_val, device, time_remaining):
-    """
-    Train model on one fold and return validation predictions.
-
-    Args:
-        X_train, Y_train: training data (numpy arrays)
-        X_val, Y_val: validation data (numpy arrays)
-        device: torch device
-        time_remaining: seconds available for this fold
-
-    Returns:
-        val_preds: numpy array of shape (n_val, n_targets)
-    """
-    n_targets = Y_train.shape[1]
-
-    # Convert to tensors
-    X_tr = torch.tensor(X_train, dtype=torch.float32, device=device)
-    Y_tr = torch.tensor(Y_train, dtype=torch.float32, device=device)
-    X_v = torch.tensor(X_val, dtype=torch.float32, device=device)
-
-    # Build mask for non-NaN targets (NaN targets are excluded from loss)
-    mask_tr = ~torch.isnan(Y_tr)
-    # Replace NaN with 0 for computation (masked out in loss anyway)
-    Y_tr_filled = torch.where(mask_tr, Y_tr, torch.zeros_like(Y_tr))
-
-    # Per-target normalization (mean/std from training set, non-NaN only)
-    target_means = torch.zeros(n_targets, device=device)
-    target_stds = torch.ones(n_targets, device=device)
-    for j in range(n_targets):
-        valid = mask_tr[:, j]
-        if valid.sum() > 1:
-            target_means[j] = Y_tr_filled[valid, j].mean()
-            target_stds[j] = Y_tr_filled[valid, j].std().clamp(min=1e-6)
-    Y_tr_norm = (Y_tr_filled - target_means) / target_stds
-
-    # Model, optimizer
-    model = MultiTaskMLP(
-        input_dim=X_tr.shape[1],
-        hidden_dims=HIDDEN_DIMS,
-        n_targets=n_targets,
-        dropout=DROPOUT,
-    ).to(device)
-
-    optimizer = torch.optim.Adam(
-        model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY
-    )
-
-    # Training loop
-    dataset = TensorDataset(X_tr, Y_tr_norm, mask_tr.float())
-    loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=False)
-
-    t_start = time.time()
-    best_val_loss = float("inf")
-    patience = 50
-    patience_counter = 0
-    best_state = None
-
-    for epoch in range(N_EPOCHS):
-        elapsed = time.time() - t_start
-        if elapsed >= time_remaining:
-            break
-
-        # Train
-        model.train()
-        epoch_loss = 0.0
-        n_batches = 0
-        for xb, yb, mb in loader:
-            pred = model(xb)
-            # Masked MSE loss
-            diff = (pred - yb) ** 2 * mb
-            loss = diff.sum() / mb.sum().clamp(min=1)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            epoch_loss += loss.item()
-            n_batches += 1
-
-        # Validate (for early stopping)
-        model.eval()
-        with torch.no_grad():
-            val_pred_norm = model(X_v)
-            # Denormalize for validation metric
-            val_pred = val_pred_norm * target_stds + target_means
-            val_pred_np = val_pred.cpu().numpy()
-            val_loss, _ = evaluate(Y_val, val_pred_np)
-            # We want to maximize Spearman, so use negative as "loss"
-            val_metric = -val_loss
-
-        if val_metric < best_val_loss:
-            best_val_loss = val_metric
-            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-            patience_counter = 0
-        else:
-            patience_counter += 1
-
-        if patience_counter >= patience:
-            break
-
-        if (epoch + 1) % 50 == 0:
-            elapsed = time.time() - t_start
-            print(f"    Epoch {epoch+1:4d} | train_loss: {epoch_loss/max(n_batches,1):.6f} | "
-                  f"val_spearman: {-val_metric:.4f} | elapsed: {elapsed:.1f}s")
-
-    # Load best model and predict
-    if best_state is not None:
-        model.load_state_dict({k: v.to(device) for k, v in best_state.items()})
-    model.eval()
-    with torch.no_grad():
-        val_pred_norm = model(X_v)
-        val_pred = val_pred_norm * target_stds + target_means
-        val_preds = val_pred.cpu().numpy()
-
-    elapsed = time.time() - t_start
-    print(f"    Fold done in {elapsed:.1f}s ({epoch+1} epochs)")
-    return val_preds
-
-# ---------------------------------------------------------------------------
-# Main: cross-validated evaluation
-# ---------------------------------------------------------------------------
-
 def main():
     t_start = time.time()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
+    print("Model: Ridge regression with physicochemical + composition + onehot features")
     print(f"Time budget: {TIME_BUDGET}s")
     print()
 
-    # Load and encode data
+    # Load data
     df = load_data()
-    X = encode_sequences(df)
+    X_onehot = encode_sequences(df)
+    X_physchem = encode_physicochemical(df)
+    X_composition = encode_aa_composition(df)
+    X = np.hstack([X_onehot, X_physchem, X_composition])
     Y = get_targets(df)
     print(f"Data: {X.shape[0]} samples, {X.shape[1]} features, {Y.shape[1]} targets")
+    print(f"  onehot: {X_onehot.shape[1]}, physchem: {X_physchem.shape[1]}, composition: {X_composition.shape[1]}")
     print()
 
     # Cross-validation
     all_preds = np.full_like(Y, np.nan)
-    time_per_fold = TIME_BUDGET / N_FOLDS
+    n_targets = Y.shape[1]
+    alphas = np.logspace(-2, 6, 50)
 
     for fold in range(N_FOLDS):
-        t_fold_start = time.time()
-        elapsed_total = t_fold_start - t_start
-        time_remaining = min(time_per_fold, TIME_BUDGET - elapsed_total)
-        if time_remaining <= 0:
-            print(f"Fold {fold}: skipping, out of time")
-            break
-
         train_idx, val_idx = get_fold_splits(df, fold)
         X_train, X_val = X[train_idx], X[val_idx]
         Y_train, Y_val = Y[train_idx], Y[val_idx]
 
-        print(f"Fold {fold}: {len(train_idx)} train, {len(val_idx)} val "
-              f"(time budget: {time_remaining:.0f}s)")
+        print(f"Fold {fold}: {len(train_idx)} train, {len(val_idx)} val")
 
-        val_preds = train_one_fold(X_train, Y_train, X_val, Y_val, device, time_remaining)
-        all_preds[val_idx] = val_preds
+        # Standardize features
+        mu = X_train.mean(axis=0)
+        std = X_train.std(axis=0)
+        std[std < 1e-8] = 1.0
+        X_train_s = (X_train - mu) / std
+        X_val_s = (X_val - mu) / std
+
+        # Train separate Ridge per target (handles missing values)
+        fold_preds = np.zeros((len(val_idx), n_targets), dtype=np.float32)
+        for j in range(n_targets):
+            mask = ~np.isnan(Y_train[:, j])
+            if mask.sum() < 5:
+                fold_preds[:, j] = 0.0
+                continue
+            ridge = RidgeCV(alphas=alphas, scoring="neg_mean_squared_error")
+            ridge.fit(X_train_s[mask], Y_train[mask, j])
+            fold_preds[:, j] = ridge.predict(X_val_s)
+            print(f"  Target {TARGET_COLS[j]:20s}: alpha={ridge.alpha_:.1f}")
+
+        all_preds[val_idx] = fold_preds
 
     print()
 
-    # Final evaluation (on all CV predictions)
+    # Final evaluation
     mean_spearman, per_target = evaluate(Y, all_preds)
 
-    # Summary
     t_end = time.time()
     total_time = t_end - t_start
 
@@ -226,12 +162,7 @@ def main():
     for name, rho in per_target.items():
         print(f"  {name:20s}: {rho:.4f}")
     print(f"training_seconds: {total_time:.1f}")
-    print(f"model:            MultiTaskMLP {HIDDEN_DIMS}")
-    print(f"dropout:          {DROPOUT}")
-    print(f"learning_rate:    {LEARNING_RATE}")
-    print(f"weight_decay:     {WEIGHT_DECAY}")
-    print(f"batch_size:       {BATCH_SIZE}")
-    print(f"device:           {device}")
+    print(f"model:            RidgeCV + physicochemical + composition + onehot")
 
 
 if __name__ == "__main__":
