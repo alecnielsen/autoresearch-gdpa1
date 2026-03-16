@@ -1,5 +1,5 @@
 """
-Antibody developability prediction — Ridge regression with physicochemical features.
+Antibody developability prediction — Ensemble of Ridge + LightGBM.
 
 Usage: uv run train.py
 """
@@ -7,6 +7,7 @@ Usage: uv run train.py
 import time
 import numpy as np
 from sklearn.linear_model import RidgeCV
+import lightgbm as lgb
 
 from prepare import (
     load_data, encode_sequences, get_targets, get_fold_splits, evaluate,
@@ -18,7 +19,6 @@ from prepare import (
 # Physicochemical properties per amino acid
 # ---------------------------------------------------------------------------
 
-# Kyte-Doolittle hydrophobicity
 HYDROPHOBICITY = {
     'A': 1.8, 'C': 2.5, 'D': -3.5, 'E': -3.5, 'F': 2.8,
     'G': -0.4, 'H': -3.2, 'I': 4.5, 'K': -3.9, 'L': 3.8,
@@ -27,7 +27,6 @@ HYDROPHOBICITY = {
     '-': 0.0,
 }
 
-# Molecular weight (Da)
 MOL_WEIGHT = {
     'A': 89, 'C': 121, 'D': 133, 'E': 147, 'F': 165,
     'G': 75, 'H': 155, 'I': 131, 'K': 146, 'L': 131,
@@ -36,7 +35,6 @@ MOL_WEIGHT = {
     '-': 0.0,
 }
 
-# Charge at pH 7
 CHARGE = {
     'A': 0, 'C': 0, 'D': -1, 'E': -1, 'F': 0,
     'G': 0, 'H': 0.1, 'I': 0, 'K': 1, 'L': 0,
@@ -45,7 +43,6 @@ CHARGE = {
     '-': 0,
 }
 
-# Polarity (Grantham)
 POLARITY = {
     'A': 8.1, 'C': 5.5, 'D': 13.0, 'E': 12.3, 'F': 5.2,
     'G': 9.0, 'H': 10.4, 'I': 5.2, 'K': 11.3, 'L': 4.9,
@@ -54,14 +51,23 @@ POLARITY = {
     '-': 0.0,
 }
 
-PROPERTY_DICTS = [HYDROPHOBICITY, MOL_WEIGHT, CHARGE, POLARITY]
+# Beta-sheet propensity (Chou-Fasman)
+BETA_SHEET = {
+    'A': 0.83, 'C': 1.19, 'D': 0.54, 'E': 0.37, 'F': 1.38,
+    'G': 0.75, 'H': 0.87, 'I': 1.60, 'K': 0.74, 'L': 1.30,
+    'M': 1.05, 'N': 0.89, 'P': 0.55, 'Q': 1.10, 'R': 0.93,
+    'S': 0.75, 'T': 1.19, 'V': 1.70, 'W': 1.37, 'Y': 1.47,
+    '-': 0.0,
+}
+
+PROPERTY_DICTS = [HYDROPHOBICITY, MOL_WEIGHT, CHARGE, POLARITY, BETA_SHEET]
 N_PROPERTIES = len(PROPERTY_DICTS)
 
 
 def encode_physicochemical(df):
     """Encode sequences as per-position physicochemical properties."""
     n = len(df)
-    n_feat = 2 * SEQ_LEN_PER_CHAIN * N_PROPERTIES  # 149 * 4 * 2 = 1192
+    n_feat = 2 * SEQ_LEN_PER_CHAIN * N_PROPERTIES
     X = np.zeros((n, n_feat), dtype=np.float32)
 
     for i, (_, row) in enumerate(df.iterrows()):
@@ -77,9 +83,9 @@ def encode_physicochemical(df):
 
 def encode_aa_composition(df):
     """Encode amino acid composition (fraction of each AA in each chain)."""
-    alphabet = GAP_CHAR + AMINO_ACIDS  # 21 chars
+    alphabet = GAP_CHAR + AMINO_ACIDS
     n = len(df)
-    n_feat = 2 * len(alphabet)  # 42
+    n_feat = 2 * len(alphabet)
     X = np.zeros((n, n_feat), dtype=np.float32)
 
     for i, (_, row) in enumerate(df.iterrows()):
@@ -90,8 +96,34 @@ def encode_aa_composition(df):
                 idx = alphabet.find(aa)
                 if idx >= 0:
                     X[i, offset + idx] += 1.0
-            # Normalize to fractions
             X[i, offset:offset + len(alphabet)] /= max(len(seq), 1)
+    return X
+
+
+def encode_summary_stats(df):
+    """Global summary statistics: net charge, mean hydrophobicity, etc."""
+    n = len(df)
+    # Per chain: mean/std of each property + net charge + aromatic fraction + length
+    n_stats = 2 * (N_PROPERTIES * 2 + 3)
+    X = np.zeros((n, n_stats), dtype=np.float32)
+
+    for i, (_, row) in enumerate(df.iterrows()):
+        for chain_idx, col in enumerate(["heavy_aligned_aho", "light_aligned_aho"]):
+            seq = row[col]
+            offset = chain_idx * (N_PROPERTIES * 2 + 3)
+            non_gap = [aa for aa in seq if aa != '-']
+            if not non_gap:
+                continue
+            for p, prop_dict in enumerate(PROPERTY_DICTS):
+                vals = [prop_dict.get(aa, 0.0) for aa in non_gap]
+                X[i, offset + p * 2] = np.mean(vals)
+                X[i, offset + p * 2 + 1] = np.std(vals)
+            # Net charge
+            X[i, offset + N_PROPERTIES * 2] = sum(CHARGE.get(aa, 0) for aa in non_gap)
+            # Aromatic fraction
+            X[i, offset + N_PROPERTIES * 2 + 1] = sum(1 for aa in non_gap if aa in 'FWY') / len(non_gap)
+            # Non-gap length
+            X[i, offset + N_PROPERTIES * 2 + 2] = len(non_gap)
     return X
 
 
@@ -101,57 +133,80 @@ def encode_aa_composition(df):
 
 def main():
     t_start = time.time()
-    print("Model: Ridge regression with physicochemical + composition + onehot features")
+    print("Model: Ridge + LightGBM ensemble")
     print(f"Time budget: {TIME_BUDGET}s")
     print()
 
-    # Load data
+    # Load and encode
     df = load_data()
     X_onehot = encode_sequences(df)
     X_physchem = encode_physicochemical(df)
     X_composition = encode_aa_composition(df)
-    X = np.hstack([X_onehot, X_physchem, X_composition])
+    X_summary = encode_summary_stats(df)
+
+    # Ridge uses all features; LightGBM uses physicochemical + composition + summary (lower dim)
+    X_ridge = np.hstack([X_onehot, X_physchem, X_composition, X_summary])
+    X_gbm = np.hstack([X_physchem, X_composition, X_summary])
+
     Y = get_targets(df)
-    print(f"Data: {X.shape[0]} samples, {X.shape[1]} features, {Y.shape[1]} targets")
-    print(f"  onehot: {X_onehot.shape[1]}, physchem: {X_physchem.shape[1]}, composition: {X_composition.shape[1]}")
+    n_targets = Y.shape[1]
+    print(f"Data: {X_ridge.shape[0]} samples")
+    print(f"  Ridge features: {X_ridge.shape[1]}")
+    print(f"  GBM features:   {X_gbm.shape[1]}")
     print()
 
-    # Cross-validation
     all_preds = np.full_like(Y, np.nan)
-    n_targets = Y.shape[1]
     alphas = np.logspace(-2, 6, 50)
+
+    lgb_params = {
+        'objective': 'regression',
+        'metric': 'mse',
+        'verbosity': -1,
+        'n_estimators': 500,
+        'learning_rate': 0.05,
+        'num_leaves': 15,
+        'min_child_samples': 10,
+        'reg_alpha': 1.0,
+        'reg_lambda': 1.0,
+        'subsample': 0.8,
+        'colsample_bytree': 0.8,
+        'max_depth': 4,
+    }
 
     for fold in range(N_FOLDS):
         train_idx, val_idx = get_fold_splits(df, fold)
-        X_train, X_val = X[train_idx], X[val_idx]
-        Y_train, Y_val = Y[train_idx], Y[val_idx]
-
         print(f"Fold {fold}: {len(train_idx)} train, {len(val_idx)} val")
 
-        # Standardize features
-        mu = X_train.mean(axis=0)
-        std = X_train.std(axis=0)
+        # Ridge predictions
+        mu = X_ridge[train_idx].mean(axis=0)
+        std = X_ridge[train_idx].std(axis=0)
         std[std < 1e-8] = 1.0
-        X_train_s = (X_train - mu) / std
-        X_val_s = (X_val - mu) / std
+        X_tr_s = (X_ridge[train_idx] - mu) / std
+        X_va_s = (X_ridge[val_idx] - mu) / std
 
-        # Train separate Ridge per target (handles missing values)
-        fold_preds = np.zeros((len(val_idx), n_targets), dtype=np.float32)
+        ridge_preds = np.zeros((len(val_idx), n_targets), dtype=np.float32)
+        gbm_preds = np.zeros((len(val_idx), n_targets), dtype=np.float32)
+
         for j in range(n_targets):
-            mask = ~np.isnan(Y_train[:, j])
+            mask = ~np.isnan(Y[train_idx, j])
             if mask.sum() < 5:
-                fold_preds[:, j] = 0.0
                 continue
-            ridge = RidgeCV(alphas=alphas, scoring="neg_mean_squared_error")
-            ridge.fit(X_train_s[mask], Y_train[mask, j])
-            fold_preds[:, j] = ridge.predict(X_val_s)
-            print(f"  Target {TARGET_COLS[j]:20s}: alpha={ridge.alpha_:.1f}")
 
-        all_preds[val_idx] = fold_preds
+            # Ridge
+            ridge = RidgeCV(alphas=alphas, scoring="neg_mean_squared_error")
+            ridge.fit(X_tr_s[mask], Y[train_idx[mask], j])
+            ridge_preds[:, j] = ridge.predict(X_va_s)
+
+            # LightGBM
+            model = lgb.LGBMRegressor(**lgb_params)
+            model.fit(X_gbm[train_idx[mask]], Y[train_idx[mask], j])
+            gbm_preds[:, j] = model.predict(X_gbm[val_idx])
+
+        # Blend: 0.6 Ridge + 0.4 LightGBM
+        all_preds[val_idx] = 0.6 * ridge_preds + 0.4 * gbm_preds
 
     print()
 
-    # Final evaluation
     mean_spearman, per_target = evaluate(Y, all_preds)
 
     t_end = time.time()
@@ -162,7 +217,7 @@ def main():
     for name, rho in per_target.items():
         print(f"  {name:20s}: {rho:.4f}")
     print(f"training_seconds: {total_time:.1f}")
-    print(f"model:            RidgeCV + physicochemical + composition + onehot")
+    print(f"model:            Ridge + LightGBM ensemble (0.6/0.4)")
 
 
 if __name__ == "__main__":
