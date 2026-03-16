@@ -123,11 +123,11 @@ def encode_esm2(df, device):
     """Extract ESM-2 mean-pooled embeddings for VH and VL sequences."""
     import esm
 
-    print("Loading ESM-2 model (esm2_t6_8M_UR50D)...")
-    model, alphabet = esm.pretrained.esm2_t6_8M_UR50D()
+    print("Loading ESM-2 model (esm2_t33_650M_UR50D)...")
+    model, alphabet = esm.pretrained.esm2_t33_650M_UR50D()
     model = model.eval().to(device)
     batch_converter = alphabet.get_batch_converter()
-    embed_dim = 320  # t6_8M embedding dimension
+    embed_dim = 1280  # t33_650M embedding dimension
 
     n = len(df)
     X = np.zeros((n, 2 * embed_dim), dtype=np.float32)
@@ -144,8 +144,8 @@ def encode_esm2(df, device):
                 batch = sequences[start:end]
                 _, _, tokens = batch_converter(batch)
                 tokens = tokens.to(device)
-                results = model(tokens, repr_layers=[6])
-                representations = results["representations"][6]
+                results = model(tokens, repr_layers=[33])
+                representations = results["representations"][33]
 
                 # Mean pool over sequence length (exclude BOS/EOS tokens)
                 for j in range(end - start):
@@ -247,7 +247,7 @@ def main():
     for name, rho in per_target.items():
         print(f"  {name:20s}: {rho:.4f}")
     print(f"training_seconds: {total_time:.1f}")
-    print(f"model:            ESM-2(t6_8M) + Ridge + LightGBM ensemble (0.6/0.4)")
+    print(f"model:            ESM-2(t33_650M) + Ridge + LightGBM ensemble (0.6/0.4)")
 
 
 if __name__ == "__main__":
