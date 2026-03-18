@@ -77,6 +77,44 @@ uv run prepare.py
 modal run modal_run.py
 ```
 
+## Results: `autoresearch/mar15` run
+
+The agent ran 14 experiments over one session, improving mean Spearman from **0.119 to 0.377** (3.2x improvement):
+
+| # | Mean Spearman | Time (s) | Status | Description |
+|---|--------------|----------|--------|-------------|
+| 1 | 0.119 | 7 | keep | Baseline MLP [512, 256] |
+| 2 | 0.151 | 1 | keep | RidgeCV + physicochemical features |
+| 3 | 0.228 | 12 | keep | Ridge + LightGBM ensemble |
+| 4 | 0.247 | 18 | keep | + ESM-2 8M embeddings |
+| 5 | 0.284 | 70 | keep | + ESM-2 650M embeddings |
+| 6 | **0.375** | 864 | keep | + Full HC/LC chain embeddings + XGBoost |
+| 7 | -- | -- | crash | ElasticNet (Modal timeout) |
+| 8 | 0.376 | 1244 | discard | Tune GBM params (marginal) |
+| 9 | 0.350 | 1508 | discard | Fine-tune ESM-2 8M (overfit) |
+| 10 | -- | -- | crash | Multi-layer ESM + bagging (timeout) |
+| 11 | -- | -- | crash | Bagged GBM 5 seeds (timeout) |
+| 12 | 0.369 | 1528 | discard | + RandomForest (worse) |
+| 13 | 0.374 | 1491 | discard | + Dipeptide features |
+| 14 | **0.377** | 1940 | keep | Diverse GBM configs (2 LGB + 2 XGB) |
+
+### Per-target breakdown (best model)
+
+| Target | Spearman |
+|---|---|
+| HIC | 0.434 |
+| Tm2 | 0.302 |
+| PR_CHO | 0.475 |
+| AC-SINS pH 7.4 | 0.398 |
+| Titer | 0.277 |
+
+### Key findings
+
+- **ESM-2 embeddings were the single biggest win.** Going from hand-crafted features to frozen ESM-2 650M embeddings roughly doubled performance (0.151 → 0.284). Including full-length heavy/light chain embeddings (not just variable regions) pushed it further to 0.375.
+- **Classical ML > neural nets for this dataset size.** Ridge + gradient boosting ensembles beat the MLP baseline. Fine-tuning ESM-2 directly on 246 samples caused overfitting.
+- **Ensemble diversity matters.** Blending Ridge (linear) with LightGBM and XGBoost (tree-based) using different hyperparameter configs gave consistent gains.
+- **Feature engineering had diminishing returns once ESM was added.** Dipeptide frequencies and extra physicochemical features didn't improve over what ESM already captures.
+
 ## Running the agent
 
 Spin up Claude Code (or similar) in this repo, then prompt:
