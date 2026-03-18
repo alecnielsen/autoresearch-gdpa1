@@ -280,8 +280,8 @@ def main():
             xgb_preds[:, j] = 0.5 * (xgb_model1.predict(X_gbm[val_idx]) +
                                        xgb_model2.predict(X_gbm[val_idx])) * y_std + y_mean
 
-        # Blend: 0.4 Ridge + 0.3 LightGBM + 0.3 XGBoost
-        all_preds[val_idx] = 0.4 * ridge_preds + 0.3 * lgb_preds + 0.3 * xgb_preds
+        # Blend: 0.5 Ridge + 0.25 LightGBM + 0.25 XGBoost
+        all_preds[val_idx] = 0.5 * ridge_preds + 0.25 * lgb_preds + 0.25 * xgb_preds
 
     print()
 
