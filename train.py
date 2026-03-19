@@ -193,7 +193,7 @@ def main():
     print(f"  Metadata features: {X_meta.shape[1]}")
 
     X_ridge = np.hstack([X_composition, X_summary, X_esm, X_meta])
-    X_gbm = np.hstack([X_onehot, X_physchem, X_composition, X_summary, X_esm, X_meta])
+    X_gbm = np.hstack([X_onehot, X_composition, X_summary, X_esm, X_meta])
 
     Y = get_targets(df)
     n_targets = Y.shape[1]
