@@ -192,7 +192,7 @@ def main():
         elif row['lc_subtype'] == 'Lambda': X_meta[i, 4] = 1
     print(f"  Metadata features: {X_meta.shape[1]}")
 
-    X_ridge = np.hstack([X_summary, X_esm, X_meta])
+    X_ridge = np.hstack([X_composition, X_summary, X_esm, X_meta])
     X_gbm = np.hstack([X_onehot, X_physchem, X_composition, X_summary, X_esm, X_meta])
 
     Y = get_targets(df)
