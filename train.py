@@ -282,7 +282,7 @@ def main():
 
         # Per-target blend weights (Ridge stronger for HIC/PR_CHO, GBMs for Tm2/Titer)
         # Target order: HIC, Tm2, PR_CHO, AC-SINS_pH7.4, Titer
-        ridge_w = np.array([1.0, 0.0, 1.0, 0.6, 0.5])
+        ridge_w = np.array([1.0, 0.0, 1.0, 0.6, 0.6])
         gbm_w = (1.0 - ridge_w) / 2.0
         for j in range(n_targets):
             all_preds[val_idx, j] = (ridge_w[j] * ridge_preds[:, j] +
