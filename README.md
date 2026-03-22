@@ -79,55 +79,41 @@ modal run modal_run.py
 
 ## Results: `autoresearch/mar15` run
 
-The agent ran 25 experiments across two sessions, improving mean Spearman from **0.119 to 0.385** (3.2x improvement):
+The agent ran 53 experiments, improving mean Spearman from **0.119 to 0.414** (3.5x improvement). Full log in `results.tsv`; key milestones:
 
-| # | Mean Spearman | Time (s) | Status | Description |
-|---|--------------|----------|--------|-------------|
-| 1 | 0.119 | 7 | keep | Baseline MLP [512, 256] |
-| 2 | 0.151 | 1 | keep | RidgeCV + physicochemical features |
-| 3 | 0.228 | 12 | keep | Ridge + LightGBM ensemble |
-| 4 | 0.247 | 18 | keep | + ESM-2 8M embeddings |
-| 5 | 0.284 | 70 | keep | + ESM-2 650M embeddings |
-| 6 | 0.375 | 864 | keep | + Full HC/LC chain embeddings + XGBoost |
-| 7 | -- | -- | crash | ElasticNet (Modal timeout) |
-| 8 | 0.376 | 1244 | discard | Tune GBM params (marginal) |
-| 9 | 0.350 | 1508 | discard | Fine-tune ESM-2 8M (overfit) |
-| 10 | -- | -- | crash | Multi-layer ESM + bagging (timeout) |
-| 11 | -- | -- | crash | Bagged GBM 5 seeds (timeout) |
-| 12 | 0.369 | 1528 | discard | + RandomForest (worse) |
-| 13 | 0.374 | 1491 | discard | + Dipeptide features |
-| 14 | 0.377 | 1940 | keep | Diverse GBM configs (2 LGB + 2 XGB) |
-| 15 | 0.259 | 1528 | discard | Huber loss (catastrophic for Tm2/Titer) |
-| 16 | 0.342 | 2006 | discard | Rank-transform targets |
-| 17 | 0.337 | 1952 | discard | PCA-Ridge (lost too much info) |
-| 18 | 0.377 | 1826 | keep | IgG/LC subtype metadata + z-scored GBMs |
-| 19 | 0.382 | 3632 | keep | One-hot features for GBMs |
-| 20 | 0.379 | 1985 | discard | Equal blend 1/3 each |
-| 21 | 0.383 | 1965 | keep | Ridge-heavy blend 0.5/0.25/0.25 |
-| 22 | **0.385** | 2021 | keep | Ridge-heavy blend 0.6/0.2/0.2 |
-| 23 | 0.384 | 3139 | discard | Ridge 0.7 (overshot) |
-| 24 | 0.384 | 3355 | discard | Remove z-score normalization |
-| 25 | 0.382 | 1562 | discard | Tighter GBM regularization |
+| # | Mean Spearman | Status | Description |
+|---|--------------|--------|-------------|
+| 1 | 0.119 | keep | Baseline MLP [512, 256] |
+| 2 | 0.151 | keep | RidgeCV + physicochemical features |
+| 3 | 0.228 | keep | Ridge + LightGBM ensemble |
+| 5 | 0.284 | keep | ESM-2 650M embeddings |
+| 6 | 0.375 | keep | Full HC/LC chain embeddings + XGBoost |
+| 14 | 0.377 | keep | Diverse GBM configs (2 LGB + 2 XGB) |
+| 22 | 0.385 | keep | Ridge-heavy blend 0.6/0.2/0.2 |
+| 33 | 0.386 | keep | Drop one-hot from Ridge |
+| 34 | 0.400 | keep | Drop physicochemical from Ridge |
+| 38 | 0.403 | keep | Drop physicochemical from GBMs too |
+| 40 | 0.404 | keep | Drop composition from GBMs |
+| 46 | 0.408 | keep | Per-target blend weights |
+| **52** | **0.414** | **keep** | **Optimized per-target Ridge/GBM weights** |
 
 ### Per-target breakdown (best model)
 
-| Target | Spearman |
-|---|---|
-| PR_CHO | 0.503 |
-| HIC | 0.460 |
-| AC-SINS pH 7.4 | 0.407 |
-| Titer | 0.284 |
-| Tm2 | 0.270 |
+| Target | Spearman | Ridge weight |
+|---|---|---|
+| PR_CHO | 0.541 | 0.7 |
+| HIC | 0.508 | 0.7 |
+| AC-SINS pH 7.4 | 0.402 | 0.5 |
+| Tm2 | 0.334 | 0.0 |
+| Titer | 0.287 | 0.3 |
 
 ### Key findings
 
-- **ESM-2 embeddings were the single biggest win.** Going from hand-crafted features to frozen ESM-2 650M embeddings roughly doubled performance (0.151 → 0.284). Including full-length heavy/light chain embeddings (not just variable regions) pushed it further to 0.375.
+- **ESM-2 embeddings were the single biggest win.** Going from hand-crafted features to frozen ESM-2 650M embeddings roughly doubled performance (0.151 → 0.284). Including full-length heavy/light chain embeddings (not just variable regions) pushed it further to 0.375. Full-length chains are critical — dropping them collapses Tm2 from 0.33 to 0.10.
 - **Classical ML > neural nets for this dataset size.** Ridge + gradient boosting ensembles beat the MLP baseline. Fine-tuning ESM-2 directly on 246 samples caused overfitting.
-- **Ensemble diversity matters.** Blending Ridge (linear) with LightGBM and XGBoost (tree-based) using different hyperparameter configs gave consistent gains.
-- **Ridge regression is the strongest single model.** Increasing Ridge's blend weight from 0.4 to 0.6 steadily improved results, with 0.6 being the sweet spot. Ridge's strong L2 regularization is well-suited to this high-dimensional, small-sample regime.
-- **Feature engineering had diminishing returns once ESM was added.** Dipeptide frequencies and extra physicochemical features didn't improve over what ESM already captures. However, one-hot sequence features helped GBMs by providing exact position-AA splits.
-- **Target preprocessing is tricky.** Z-score normalization helped GBMs slightly, but Huber loss and rank-transforms both hurt badly. Spearman is rank-based but MSE-trained models still optimize for it effectively.
-- **Antibody metadata (IgG subtype, light chain type) provided a small boost** — these structural features are known before any assay and carry developability-relevant information.
+- **Each model type needs different features.** Ridge does best with dense, low-noise features (ESM + composition + summary + metadata). GBMs do best with sparse high-dimensional features (one-hot + ESM + summary + metadata). Physicochemical features hurt both when ESM is present. This realization took us from 0.385 to 0.404.
+- **Per-target blend weights were the final breakthrough.** Different targets have radically different optimal model blends. Tm2 (thermal stability) does best with pure GBM (Ridge weight = 0.0), while HIC and PR_CHO do best at 70% Ridge. This took us from 0.404 to 0.414.
+- **Simplification was key.** Many of the best experiments involved *removing* features or complexity, not adding it. Less is more when your embeddings are good.
 
 ## Running the agent
 
