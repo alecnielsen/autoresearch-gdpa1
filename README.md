@@ -79,7 +79,7 @@ modal run modal_run.py
 
 ## Results: `autoresearch/mar15` run
 
-The agent ran 14 experiments over one session, improving mean Spearman from **0.119 to 0.377** (3.2x improvement):
+The agent ran 25 experiments across two sessions, improving mean Spearman from **0.119 to 0.385** (3.2x improvement):
 
 | # | Mean Spearman | Time (s) | Status | Description |
 |---|--------------|----------|--------|-------------|
@@ -88,7 +88,7 @@ The agent ran 14 experiments over one session, improving mean Spearman from **0.
 | 3 | 0.228 | 12 | keep | Ridge + LightGBM ensemble |
 | 4 | 0.247 | 18 | keep | + ESM-2 8M embeddings |
 | 5 | 0.284 | 70 | keep | + ESM-2 650M embeddings |
-| 6 | **0.375** | 864 | keep | + Full HC/LC chain embeddings + XGBoost |
+| 6 | 0.375 | 864 | keep | + Full HC/LC chain embeddings + XGBoost |
 | 7 | -- | -- | crash | ElasticNet (Modal timeout) |
 | 8 | 0.376 | 1244 | discard | Tune GBM params (marginal) |
 | 9 | 0.350 | 1508 | discard | Fine-tune ESM-2 8M (overfit) |
@@ -96,24 +96,38 @@ The agent ran 14 experiments over one session, improving mean Spearman from **0.
 | 11 | -- | -- | crash | Bagged GBM 5 seeds (timeout) |
 | 12 | 0.369 | 1528 | discard | + RandomForest (worse) |
 | 13 | 0.374 | 1491 | discard | + Dipeptide features |
-| 14 | **0.377** | 1940 | keep | Diverse GBM configs (2 LGB + 2 XGB) |
+| 14 | 0.377 | 1940 | keep | Diverse GBM configs (2 LGB + 2 XGB) |
+| 15 | 0.259 | 1528 | discard | Huber loss (catastrophic for Tm2/Titer) |
+| 16 | 0.342 | 2006 | discard | Rank-transform targets |
+| 17 | 0.337 | 1952 | discard | PCA-Ridge (lost too much info) |
+| 18 | 0.377 | 1826 | keep | IgG/LC subtype metadata + z-scored GBMs |
+| 19 | 0.382 | 3632 | keep | One-hot features for GBMs |
+| 20 | 0.379 | 1985 | discard | Equal blend 1/3 each |
+| 21 | 0.383 | 1965 | keep | Ridge-heavy blend 0.5/0.25/0.25 |
+| 22 | **0.385** | 2021 | keep | Ridge-heavy blend 0.6/0.2/0.2 |
+| 23 | 0.384 | 3139 | discard | Ridge 0.7 (overshot) |
+| 24 | 0.384 | 3355 | discard | Remove z-score normalization |
+| 25 | 0.382 | 1562 | discard | Tighter GBM regularization |
 
 ### Per-target breakdown (best model)
 
 | Target | Spearman |
 |---|---|
-| HIC | 0.434 |
-| Tm2 | 0.302 |
-| PR_CHO | 0.475 |
-| AC-SINS pH 7.4 | 0.398 |
-| Titer | 0.277 |
+| PR_CHO | 0.503 |
+| HIC | 0.460 |
+| AC-SINS pH 7.4 | 0.407 |
+| Titer | 0.284 |
+| Tm2 | 0.270 |
 
 ### Key findings
 
 - **ESM-2 embeddings were the single biggest win.** Going from hand-crafted features to frozen ESM-2 650M embeddings roughly doubled performance (0.151 → 0.284). Including full-length heavy/light chain embeddings (not just variable regions) pushed it further to 0.375.
 - **Classical ML > neural nets for this dataset size.** Ridge + gradient boosting ensembles beat the MLP baseline. Fine-tuning ESM-2 directly on 246 samples caused overfitting.
 - **Ensemble diversity matters.** Blending Ridge (linear) with LightGBM and XGBoost (tree-based) using different hyperparameter configs gave consistent gains.
-- **Feature engineering had diminishing returns once ESM was added.** Dipeptide frequencies and extra physicochemical features didn't improve over what ESM already captures.
+- **Ridge regression is the strongest single model.** Increasing Ridge's blend weight from 0.4 to 0.6 steadily improved results, with 0.6 being the sweet spot. Ridge's strong L2 regularization is well-suited to this high-dimensional, small-sample regime.
+- **Feature engineering had diminishing returns once ESM was added.** Dipeptide frequencies and extra physicochemical features didn't improve over what ESM already captures. However, one-hot sequence features helped GBMs by providing exact position-AA splits.
+- **Target preprocessing is tricky.** Z-score normalization helped GBMs slightly, but Huber loss and rank-transforms both hurt badly. Spearman is rank-based but MSE-trained models still optimize for it effectively.
+- **Antibody metadata (IgG subtype, light chain type) provided a small boost** — these structural features are known before any assay and carry developability-relevant information.
 
 ## Running the agent
 
