@@ -77,6 +77,48 @@ uv run prepare.py
 modal run modal_run.py
 ```
 
+## Results: `autoresearch/mar15` run
+
+The agent ran 76 experiments, improving mean Spearman from **0.119 to 0.423** (3.6x improvement). Full log in `results.tsv`; key milestones:
+
+| # | Mean Spearman | Status | Description |
+|---|--------------|--------|-------------|
+| 1 | 0.119 | keep | Baseline MLP [512, 256] |
+| 2 | 0.151 | keep | RidgeCV + physicochemical features |
+| 3 | 0.228 | keep | Ridge + LightGBM ensemble |
+| 5 | 0.284 | keep | ESM-2 650M embeddings |
+| 6 | 0.375 | keep | Full HC/LC chain embeddings + XGBoost |
+| 14 | 0.377 | keep | Diverse GBM configs (2 LGB + 2 XGB) |
+| 22 | 0.385 | keep | Ridge-heavy blend 0.6/0.2/0.2 |
+| 34 | 0.400 | keep | Drop physicochemical from Ridge |
+| 40 | 0.404 | keep | Drop composition from GBMs |
+| 46 | 0.408 | keep | Per-target blend weights |
+| 56 | 0.417 | keep | HIC/PR_CHO pure Ridge, Tm2 pure GBM |
+| 64 | 0.419 | keep | Titer Ridge 0.7 |
+| 66 | 0.422 | keep | Enriched Tm2 GBM features (physchem) |
+| 71 | 0.422 | keep | Add composition back to GBMs |
+| **75** | **0.423** | **keep** | **Per-target GBM hyperparams (AC-SINS depth 5)** |
+
+### Per-target breakdown (best model)
+
+Each target has its own optimized model configuration:
+
+| Target | Spearman | Ridge weight | GBM features | GBM config 2 |
+|---|---|---|---|---|
+| PR_CHO | 0.540 | 1.0 (pure Ridge) | lean | depth 6 |
+| HIC | 0.522 | 1.0 (pure Ridge) | lean | depth 6 |
+| AC-SINS pH 7.4 | 0.410 | 0.6 | lean | depth 5 |
+| Tm2 | 0.348 | 0.0 (pure GBM) | enriched (+physchem) | depth 6 |
+| Titer | 0.297 | 0.7 | lean | depth 6 |
+
+### Key findings
+
+- **ESM-2 embeddings were the single biggest win.** Going from hand-crafted features to frozen ESM-2 650M embeddings roughly doubled performance (0.151 → 0.284). Including full-length heavy/light chain embeddings (not just variable regions) pushed it further to 0.375. Full-length chains are critical — dropping them collapses Tm2 from 0.33 to 0.10.
+- **Classical ML > neural nets for this dataset size.** Ridge + gradient boosting ensembles beat the MLP baseline. Fine-tuning ESM-2 directly on 246 samples caused overfitting.
+- **Each model type needs different features.** Ridge does best with dense, low-noise features (ESM + composition + summary + metadata). GBMs do best with sparse high-dimensional features (one-hot + ESM + composition + summary + metadata). Physicochemical features only help Tm2's GBMs. This realization took us from 0.385 to 0.404.
+- **Full per-target specialization was the key late-game strategy.** Each target has its own optimal Ridge/GBM blend weight, GBM feature set, and GBM hyperparameters. This took us from 0.404 to 0.423. Tm2 (thermal stability) is a pure GBM problem needing enriched features. HIC and PR_CHO are pure Ridge problems. AC-SINS benefits from less diverse GBM configs.
+- **Simplification was key in the mid-game.** Removing noisy features (physicochemical from Ridge, composition from GBMs) gave large gains. But in the late game, *selectively adding back* features for specific targets (physchem for Tm2, composition for all GBMs) continued to improve results.
+
 ## Running the agent
 
 Spin up Claude Code (or similar) in this repo, then prompt:

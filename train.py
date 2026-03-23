@@ -1,223 +1,312 @@
 """
-Antibody developability prediction — baseline model.
-Multi-task MLP on one-hot encoded AHo-aligned sequences.
+Antibody developability prediction — ESM-2 650M + Ridge + LightGBM + XGBoost ensemble.
+
+Uses ESM-2 embeddings from both variable and full-length chains.
+Three-model ensemble with optimized blending.
 
 Usage: uv run train.py
 """
 
 import time
 import numpy as np
-
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import DataLoader, TensorDataset
+from sklearn.linear_model import RidgeCV
+import lightgbm as lgb
+import xgboost as xgb
 
 from prepare import (
     load_data, encode_sequences, get_targets, get_fold_splits, evaluate,
     TARGET_COLS, N_FOLDS, TIME_BUDGET, ONEHOT_DIM,
+    AMINO_ACIDS, GAP_CHAR, SEQ_LEN_PER_CHAIN,
 )
 
 # ---------------------------------------------------------------------------
-# Model
+# Physicochemical properties per amino acid
 # ---------------------------------------------------------------------------
 
-class MultiTaskMLP(nn.Module):
-    """Simple multi-task MLP for antibody developability prediction."""
+HYDROPHOBICITY = {
+    'A': 1.8, 'C': 2.5, 'D': -3.5, 'E': -3.5, 'F': 2.8,
+    'G': -0.4, 'H': -3.2, 'I': 4.5, 'K': -3.9, 'L': 3.8,
+    'M': 1.9, 'N': -3.5, 'P': -1.6, 'Q': -3.5, 'R': -4.5,
+    'S': -0.8, 'T': -0.7, 'V': 4.2, 'W': -0.9, 'Y': -1.3,
+    '-': 0.0,
+}
 
-    def __init__(self, input_dim, hidden_dims, n_targets, dropout=0.1):
-        super().__init__()
-        layers = []
-        prev_dim = input_dim
-        for h_dim in hidden_dims:
-            layers.append(nn.Linear(prev_dim, h_dim))
-            layers.append(nn.ReLU())
-            layers.append(nn.Dropout(dropout))
-            prev_dim = h_dim
-        self.backbone = nn.Sequential(*layers)
-        self.head = nn.Linear(prev_dim, n_targets)
+MOL_WEIGHT = {
+    'A': 89, 'C': 121, 'D': 133, 'E': 147, 'F': 165,
+    'G': 75, 'H': 155, 'I': 131, 'K': 146, 'L': 131,
+    'M': 149, 'N': 132, 'P': 115, 'Q': 146, 'R': 174,
+    'S': 105, 'T': 119, 'V': 117, 'W': 204, 'Y': 181,
+    '-': 0.0,
+}
 
-    def forward(self, x):
-        h = self.backbone(x)
-        return self.head(h)
+CHARGE = {
+    'A': 0, 'C': 0, 'D': -1, 'E': -1, 'F': 0,
+    'G': 0, 'H': 0.1, 'I': 0, 'K': 1, 'L': 0,
+    'M': 0, 'N': 0, 'P': 0, 'Q': 0, 'R': 1,
+    'S': 0, 'T': 0, 'V': 0, 'W': 0, 'Y': 0,
+    '-': 0,
+}
 
-# ---------------------------------------------------------------------------
-# Hyperparameters
-# ---------------------------------------------------------------------------
+POLARITY = {
+    'A': 8.1, 'C': 5.5, 'D': 13.0, 'E': 12.3, 'F': 5.2,
+    'G': 9.0, 'H': 10.4, 'I': 5.2, 'K': 11.3, 'L': 4.9,
+    'M': 5.7, 'N': 11.6, 'P': 8.0, 'Q': 10.5, 'R': 10.5,
+    'S': 9.2, 'T': 8.6, 'V': 5.9, 'W': 5.4, 'Y': 6.2,
+    '-': 0.0,
+}
 
-HIDDEN_DIMS = [512, 256]    # MLP hidden layer sizes
-DROPOUT = 0.1               # dropout rate
-LEARNING_RATE = 1e-3        # Adam learning rate
-WEIGHT_DECAY = 1e-4         # L2 regularization
-BATCH_SIZE = 32             # training batch size
-N_EPOCHS = 500              # max epochs (will stop early if time runs out)
+BETA_SHEET = {
+    'A': 0.83, 'C': 1.19, 'D': 0.54, 'E': 0.37, 'F': 1.38,
+    'G': 0.75, 'H': 0.87, 'I': 1.60, 'K': 0.74, 'L': 1.30,
+    'M': 1.05, 'N': 0.89, 'P': 0.55, 'Q': 1.10, 'R': 0.93,
+    'S': 0.75, 'T': 1.19, 'V': 1.70, 'W': 1.37, 'Y': 1.47,
+    '-': 0.0,
+}
+
+PROPERTY_DICTS = [HYDROPHOBICITY, MOL_WEIGHT, CHARGE, POLARITY, BETA_SHEET]
+N_PROPERTIES = len(PROPERTY_DICTS)
+
+
+def encode_physicochemical(df):
+    n = len(df)
+    n_feat = 2 * SEQ_LEN_PER_CHAIN * N_PROPERTIES
+    X = np.zeros((n, n_feat), dtype=np.float32)
+    for i, (_, row) in enumerate(df.iterrows()):
+        for chain_idx, col in enumerate(["heavy_aligned_aho", "light_aligned_aho"]):
+            seq = row[col]
+            offset = chain_idx * SEQ_LEN_PER_CHAIN * N_PROPERTIES
+            for pos, aa in enumerate(seq):
+                for p, prop_dict in enumerate(PROPERTY_DICTS):
+                    X[i, offset + pos * N_PROPERTIES + p] = prop_dict.get(aa, 0.0)
+    return X
+
+
+def encode_aa_composition(df):
+    alphabet = GAP_CHAR + AMINO_ACIDS
+    n = len(df)
+    n_feat = 2 * len(alphabet)
+    X = np.zeros((n, n_feat), dtype=np.float32)
+    for i, (_, row) in enumerate(df.iterrows()):
+        for chain_idx, col in enumerate(["heavy_aligned_aho", "light_aligned_aho"]):
+            seq = row[col]
+            offset = chain_idx * len(alphabet)
+            for aa in seq:
+                idx = alphabet.find(aa)
+                if idx >= 0:
+                    X[i, offset + idx] += 1.0
+            X[i, offset:offset + len(alphabet)] /= max(len(seq), 1)
+    return X
+
+
+def encode_summary_stats(df):
+    n = len(df)
+    n_stats = 2 * (N_PROPERTIES * 2 + 3)
+    X = np.zeros((n, n_stats), dtype=np.float32)
+    for i, (_, row) in enumerate(df.iterrows()):
+        for chain_idx, col in enumerate(["heavy_aligned_aho", "light_aligned_aho"]):
+            seq = row[col]
+            offset = chain_idx * (N_PROPERTIES * 2 + 3)
+            non_gap = [aa for aa in seq if aa != '-']
+            if not non_gap:
+                continue
+            for p, prop_dict in enumerate(PROPERTY_DICTS):
+                vals = [prop_dict.get(aa, 0.0) for aa in non_gap]
+                X[i, offset + p * 2] = np.mean(vals)
+                X[i, offset + p * 2 + 1] = np.std(vals)
+            X[i, offset + N_PROPERTIES * 2] = sum(CHARGE.get(aa, 0) for aa in non_gap)
+            X[i, offset + N_PROPERTIES * 2 + 1] = sum(1 for aa in non_gap if aa in 'FWY') / len(non_gap)
+            X[i, offset + N_PROPERTIES * 2 + 2] = len(non_gap)
+    return X
+
+
+def encode_esm2(df, device):
+    """Extract ESM-2 mean-pooled embeddings for VH, VL, full HC, full LC."""
+    import esm
+
+    print("Loading ESM-2 model (esm2_t33_650M_UR50D)...")
+    model, alphabet = esm.pretrained.esm2_t33_650M_UR50D()
+    model = model.eval().to(device)
+    batch_converter = alphabet.get_batch_converter()
+    embed_dim = 1280
+
+    # 4 chains: VH, VL, full HC, full LC
+    chain_cols = [
+        "vh_protein_sequence", "vl_protein_sequence",
+        "hc_protein_sequence", "lc_protein_sequence",
+    ]
+    n = len(df)
+    X = np.zeros((n, len(chain_cols) * embed_dim), dtype=np.float32)
+
+    with torch.no_grad():
+        for chain_idx, col in enumerate(chain_cols):
+            print(f"  Encoding {col}...")
+            # Strip stop codons (*) and any non-standard characters
+            sequences = [(f"seq_{i}", row[col].replace("*", "")) for i, (_, row) in enumerate(df.iterrows())]
+
+            batch_size = 16 if "hc_" in col or "lc_" in col else 32
+            for start in range(0, n, batch_size):
+                end = min(start + batch_size, n)
+                batch = sequences[start:end]
+                _, _, tokens = batch_converter(batch)
+                tokens = tokens.to(device)
+                results = model(tokens, repr_layers=[33])
+                representations = results["representations"][33]
+
+                for j in range(end - start):
+                    seq_len = len(batch[j][1])
+                    emb = representations[j, 1:seq_len+1].mean(dim=0).cpu().numpy()
+                    X[start + j, chain_idx * embed_dim:(chain_idx + 1) * embed_dim] = emb
+
+    print(f"  ESM-2 embeddings: {X.shape}")
+    return X
+
 
 # ---------------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------------
 
-def train_one_fold(X_train, Y_train, X_val, Y_val, device, time_remaining):
-    """
-    Train model on one fold and return validation predictions.
-
-    Args:
-        X_train, Y_train: training data (numpy arrays)
-        X_val, Y_val: validation data (numpy arrays)
-        device: torch device
-        time_remaining: seconds available for this fold
-
-    Returns:
-        val_preds: numpy array of shape (n_val, n_targets)
-    """
-    n_targets = Y_train.shape[1]
-
-    # Convert to tensors
-    X_tr = torch.tensor(X_train, dtype=torch.float32, device=device)
-    Y_tr = torch.tensor(Y_train, dtype=torch.float32, device=device)
-    X_v = torch.tensor(X_val, dtype=torch.float32, device=device)
-
-    # Build mask for non-NaN targets (NaN targets are excluded from loss)
-    mask_tr = ~torch.isnan(Y_tr)
-    # Replace NaN with 0 for computation (masked out in loss anyway)
-    Y_tr_filled = torch.where(mask_tr, Y_tr, torch.zeros_like(Y_tr))
-
-    # Per-target normalization (mean/std from training set, non-NaN only)
-    target_means = torch.zeros(n_targets, device=device)
-    target_stds = torch.ones(n_targets, device=device)
-    for j in range(n_targets):
-        valid = mask_tr[:, j]
-        if valid.sum() > 1:
-            target_means[j] = Y_tr_filled[valid, j].mean()
-            target_stds[j] = Y_tr_filled[valid, j].std().clamp(min=1e-6)
-    Y_tr_norm = (Y_tr_filled - target_means) / target_stds
-
-    # Model, optimizer
-    model = MultiTaskMLP(
-        input_dim=X_tr.shape[1],
-        hidden_dims=HIDDEN_DIMS,
-        n_targets=n_targets,
-        dropout=DROPOUT,
-    ).to(device)
-
-    optimizer = torch.optim.Adam(
-        model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY
-    )
-
-    # Training loop
-    dataset = TensorDataset(X_tr, Y_tr_norm, mask_tr.float())
-    loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=False)
-
-    t_start = time.time()
-    best_val_loss = float("inf")
-    patience = 50
-    patience_counter = 0
-    best_state = None
-
-    for epoch in range(N_EPOCHS):
-        elapsed = time.time() - t_start
-        if elapsed >= time_remaining:
-            break
-
-        # Train
-        model.train()
-        epoch_loss = 0.0
-        n_batches = 0
-        for xb, yb, mb in loader:
-            pred = model(xb)
-            # Masked MSE loss
-            diff = (pred - yb) ** 2 * mb
-            loss = diff.sum() / mb.sum().clamp(min=1)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            epoch_loss += loss.item()
-            n_batches += 1
-
-        # Validate (for early stopping)
-        model.eval()
-        with torch.no_grad():
-            val_pred_norm = model(X_v)
-            # Denormalize for validation metric
-            val_pred = val_pred_norm * target_stds + target_means
-            val_pred_np = val_pred.cpu().numpy()
-            val_loss, _ = evaluate(Y_val, val_pred_np)
-            # We want to maximize Spearman, so use negative as "loss"
-            val_metric = -val_loss
-
-        if val_metric < best_val_loss:
-            best_val_loss = val_metric
-            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-            patience_counter = 0
-        else:
-            patience_counter += 1
-
-        if patience_counter >= patience:
-            break
-
-        if (epoch + 1) % 50 == 0:
-            elapsed = time.time() - t_start
-            print(f"    Epoch {epoch+1:4d} | train_loss: {epoch_loss/max(n_batches,1):.6f} | "
-                  f"val_spearman: {-val_metric:.4f} | elapsed: {elapsed:.1f}s")
-
-    # Load best model and predict
-    if best_state is not None:
-        model.load_state_dict({k: v.to(device) for k, v in best_state.items()})
-    model.eval()
-    with torch.no_grad():
-        val_pred_norm = model(X_v)
-        val_pred = val_pred_norm * target_stds + target_means
-        val_preds = val_pred.cpu().numpy()
-
-    elapsed = time.time() - t_start
-    print(f"    Fold done in {elapsed:.1f}s ({epoch+1} epochs)")
-    return val_preds
-
-# ---------------------------------------------------------------------------
-# Main: cross-validated evaluation
-# ---------------------------------------------------------------------------
-
 def main():
     t_start = time.time()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Model: ESM-2(650M) + Ridge + LightGBM + XGBoost ensemble")
     print(f"Device: {device}")
     print(f"Time budget: {TIME_BUDGET}s")
     print()
 
-    # Load and encode data
+    # Load and encode
     df = load_data()
-    X = encode_sequences(df)
+    X_onehot = encode_sequences(df)
+    X_physchem = encode_physicochemical(df)
+    X_composition = encode_aa_composition(df)
+    X_summary = encode_summary_stats(df)
+    X_esm = encode_esm2(df, device)
+
+    # Encode antibody metadata (IgG subtype, light chain type)
+    X_meta = np.zeros((len(df), 5), dtype=np.float32)  # IgG1, IgG2, IgG4, Kappa, Lambda
+    for i, (_, row) in enumerate(df.iterrows()):
+        if row['hc_subtype'] == 'IgG1': X_meta[i, 0] = 1
+        elif row['hc_subtype'] == 'IgG2': X_meta[i, 1] = 1
+        elif row['hc_subtype'] == 'IgG4': X_meta[i, 2] = 1
+        if row['lc_subtype'] == 'Kappa': X_meta[i, 3] = 1
+        elif row['lc_subtype'] == 'Lambda': X_meta[i, 4] = 1
+    print(f"  Metadata features: {X_meta.shape[1]}")
+
+    X_ridge = np.hstack([X_composition, X_summary, X_esm, X_meta])
+    X_gbm = np.hstack([X_onehot, X_composition, X_summary, X_esm, X_meta])
+    # Tm2-specific GBM features: add composition + physchem back (Tm2 is pure GBM)
+    X_gbm_tm2 = np.hstack([X_onehot, X_physchem, X_composition, X_summary, X_esm, X_meta])
+
     Y = get_targets(df)
-    print(f"Data: {X.shape[0]} samples, {X.shape[1]} features, {Y.shape[1]} targets")
+    n_targets = Y.shape[1]
+    print(f"Data: {X_ridge.shape[0]} samples")
+    print(f"  Ridge features: {X_ridge.shape[1]}")
+    print(f"  GBM features:   {X_gbm.shape[1]}")
     print()
 
-    # Cross-validation
     all_preds = np.full_like(Y, np.nan)
-    time_per_fold = TIME_BUDGET / N_FOLDS
+    alphas = np.logspace(-2, 6, 50)
+
+    lgb_params = {
+        'objective': 'regression', 'metric': 'mse', 'verbosity': -1,
+        'n_estimators': 700, 'learning_rate': 0.04,
+        'num_leaves': 15, 'min_child_samples': 10,
+        'reg_alpha': 1.0, 'reg_lambda': 1.0,
+        'subsample': 0.8, 'colsample_bytree': 0.8, 'max_depth': 4,
+    }
+
+    xgb_params = {
+        'objective': 'reg:squarederror', 'verbosity': 0,
+        'n_estimators': 700, 'learning_rate': 0.04,
+        'max_depth': 4, 'min_child_weight': 10,
+        'reg_alpha': 1.0, 'reg_lambda': 1.0,
+        'subsample': 0.8, 'colsample_bytree': 0.8,
+    }
 
     for fold in range(N_FOLDS):
-        t_fold_start = time.time()
-        elapsed_total = t_fold_start - t_start
-        time_remaining = min(time_per_fold, TIME_BUDGET - elapsed_total)
-        if time_remaining <= 0:
-            print(f"Fold {fold}: skipping, out of time")
-            break
-
         train_idx, val_idx = get_fold_splits(df, fold)
-        X_train, X_val = X[train_idx], X[val_idx]
-        Y_train, Y_val = Y[train_idx], Y[val_idx]
+        print(f"Fold {fold}: {len(train_idx)} train, {len(val_idx)} val")
 
-        print(f"Fold {fold}: {len(train_idx)} train, {len(val_idx)} val "
-              f"(time budget: {time_remaining:.0f}s)")
+        # Standardize for Ridge
+        mu = X_ridge[train_idx].mean(axis=0)
+        std = X_ridge[train_idx].std(axis=0)
+        std[std < 1e-8] = 1.0
+        X_tr_s = (X_ridge[train_idx] - mu) / std
+        X_va_s = (X_ridge[val_idx] - mu) / std
 
-        val_preds = train_one_fold(X_train, Y_train, X_val, Y_val, device, time_remaining)
-        all_preds[val_idx] = val_preds
+        ridge_preds = np.zeros((len(val_idx), n_targets), dtype=np.float32)
+        lgb_preds = np.zeros((len(val_idx), n_targets), dtype=np.float32)
+        xgb_preds = np.zeros((len(val_idx), n_targets), dtype=np.float32)
+
+        for j in range(n_targets):
+            mask = ~np.isnan(Y[train_idx, j])
+            if mask.sum() < 5:
+                continue
+
+            y_tr = Y[train_idx[mask], j]
+
+            # Z-score targets for GBMs (standardize per fold)
+            y_mean = y_tr.mean()
+            y_std = y_tr.std()
+            if y_std < 1e-8:
+                y_std = 1.0
+            y_tr_z = (y_tr - y_mean) / y_std
+
+            # Ridge on raw targets (handles its own regularization)
+            ridge = RidgeCV(alphas=alphas, scoring="neg_mean_squared_error")
+            ridge.fit(X_tr_s[mask], y_tr)
+            ridge_preds[:, j] = ridge.predict(X_va_s)
+
+            # Select GBM features (Tm2 gets enriched feature set)
+            X_gbm_j = X_gbm_tm2 if j == 1 else X_gbm
+
+            # LightGBM on z-scored targets
+            lgb_model1 = lgb.LGBMRegressor(**lgb_params)
+            lgb_model1.fit(X_gbm_j[train_idx[mask]], y_tr_z)
+
+            # AC-SINS gets less diverse config 2 (depth 5), others get depth 6
+            if j == 3:  # AC-SINS
+                lgb_p2 = {**lgb_params, 'num_leaves': 20, 'max_depth': 5,
+                           'min_child_samples': 8, 'colsample_bytree': 0.7}
+            else:
+                lgb_p2 = {**lgb_params, 'num_leaves': 31, 'max_depth': 6,
+                           'min_child_samples': 5, 'colsample_bytree': 0.6}
+            lgb_model2 = lgb.LGBMRegressor(**lgb_p2)
+            lgb_model2.fit(X_gbm_j[train_idx[mask]], y_tr_z)
+
+            # Inverse z-score transform
+            lgb_preds[:, j] = 0.5 * (lgb_model1.predict(X_gbm_j[val_idx]) +
+                                       lgb_model2.predict(X_gbm_j[val_idx])) * y_std + y_mean
+
+            # XGBoost on z-scored targets
+            xgb_model1 = xgb.XGBRegressor(**xgb_params)
+            xgb_model1.fit(X_gbm_j[train_idx[mask]], y_tr_z)
+
+            if j == 3:  # AC-SINS
+                xgb_p2 = {**xgb_params, 'max_depth': 5, 'min_child_weight': 8,
+                           'colsample_bytree': 0.7}
+            else:
+                xgb_p2 = {**xgb_params, 'max_depth': 6, 'min_child_weight': 5,
+                           'colsample_bytree': 0.6}
+            xgb_model2 = xgb.XGBRegressor(**xgb_p2)
+            xgb_model2.fit(X_gbm_j[train_idx[mask]], y_tr_z)
+
+            xgb_preds[:, j] = 0.5 * (xgb_model1.predict(X_gbm_j[val_idx]) +
+                                       xgb_model2.predict(X_gbm_j[val_idx])) * y_std + y_mean
+
+        # Per-target blend weights (Ridge stronger for HIC/PR_CHO, GBMs for Tm2/Titer)
+        # Target order: HIC, Tm2, PR_CHO, AC-SINS_pH7.4, Titer
+        ridge_w = np.array([1.0, 0.0, 1.0, 0.6, 0.7])
+        gbm_w = (1.0 - ridge_w) / 2.0
+        for j in range(n_targets):
+            all_preds[val_idx, j] = (ridge_w[j] * ridge_preds[:, j] +
+                                      gbm_w[j] * lgb_preds[:, j] +
+                                      gbm_w[j] * xgb_preds[:, j])
 
     print()
 
-    # Final evaluation (on all CV predictions)
     mean_spearman, per_target = evaluate(Y, all_preds)
 
-    # Summary
     t_end = time.time()
     total_time = t_end - t_start
 
@@ -226,12 +315,7 @@ def main():
     for name, rho in per_target.items():
         print(f"  {name:20s}: {rho:.4f}")
     print(f"training_seconds: {total_time:.1f}")
-    print(f"model:            MultiTaskMLP {HIDDEN_DIMS}")
-    print(f"dropout:          {DROPOUT}")
-    print(f"learning_rate:    {LEARNING_RATE}")
-    print(f"weight_decay:     {WEIGHT_DECAY}")
-    print(f"batch_size:       {BATCH_SIZE}")
-    print(f"device:           {device}")
+    print(f"model:            ESM-2(t33_650M) + metadata + onehot-GBM + z-scored")
 
 
 if __name__ == "__main__":
