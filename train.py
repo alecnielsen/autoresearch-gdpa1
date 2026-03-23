@@ -99,6 +99,28 @@ def encode_aa_composition(df):
     return X
 
 
+def encode_dipeptide(df):
+    """Dipeptide (2-mer) frequency features for heavy and light chains."""
+    alphabet = AMINO_ACIDS  # 20 AAs (skip gaps)
+    n_dipeptides = len(alphabet) ** 2  # 400
+    n = len(df)
+    X = np.zeros((n, 2 * n_dipeptides), dtype=np.float32)
+    for i, (_, row) in enumerate(df.iterrows()):
+        for chain_idx, col in enumerate(["heavy_aligned_aho", "light_aligned_aho"]):
+            seq = row[col].replace('-', '')  # remove gaps
+            offset = chain_idx * n_dipeptides
+            for k in range(len(seq) - 1):
+                a1, a2 = seq[k], seq[k+1]
+                idx1 = alphabet.find(a1)
+                idx2 = alphabet.find(a2)
+                if idx1 >= 0 and idx2 >= 0:
+                    X[i, offset + idx1 * len(alphabet) + idx2] += 1.0
+            # Normalize to frequencies
+            total = max(len(seq) - 1, 1)
+            X[i, offset:offset + n_dipeptides] /= total
+    return X
+
+
 def encode_summary_stats(df):
     n = len(df)
     n_stats = 2 * (N_PROPERTIES * 2 + 3)
@@ -192,7 +214,10 @@ def main():
         elif row['lc_subtype'] == 'Lambda': X_meta[i, 4] = 1
     print(f"  Metadata features: {X_meta.shape[1]}")
 
-    X_ridge = np.hstack([X_composition, X_summary, X_esm, X_meta])
+    X_dipeptide = encode_dipeptide(df)
+    print(f"  Dipeptide features: {X_dipeptide.shape[1]}")
+
+    X_ridge = np.hstack([X_composition, X_summary, X_dipeptide, X_esm, X_meta])
     X_gbm = np.hstack([X_onehot, X_composition, X_summary, X_esm, X_meta])
     # Tm2-specific GBM features: add composition + physchem back (Tm2 is pure GBM)
     X_gbm_tm2 = np.hstack([X_onehot, X_physchem, X_composition, X_summary, X_esm, X_meta])
