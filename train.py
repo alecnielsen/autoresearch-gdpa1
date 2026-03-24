@@ -99,6 +99,59 @@ def encode_aa_composition(df):
     return X
 
 
+def encode_dipeptide(df):
+    """Dipeptide (2-mer) frequency features for heavy and light chains."""
+    alphabet = AMINO_ACIDS  # 20 AAs (skip gaps)
+    n_dipeptides = len(alphabet) ** 2  # 400
+    n = len(df)
+    X = np.zeros((n, 2 * n_dipeptides), dtype=np.float32)
+    for i, (_, row) in enumerate(df.iterrows()):
+        for chain_idx, col in enumerate(["heavy_aligned_aho", "light_aligned_aho"]):
+            seq = row[col].replace('-', '')  # remove gaps
+            offset = chain_idx * n_dipeptides
+            for k in range(len(seq) - 1):
+                a1, a2 = seq[k], seq[k+1]
+                idx1 = alphabet.find(a1)
+                idx2 = alphabet.find(a2)
+                if idx1 >= 0 and idx2 >= 0:
+                    X[i, offset + idx1 * len(alphabet) + idx2] += 1.0
+            # Normalize to frequencies
+            total = max(len(seq) - 1, 1)
+            X[i, offset:offset + n_dipeptides] /= total
+    return X
+
+
+def encode_chain_interactions(df):
+    """Cross-chain interaction features: differences and products of H/L chain properties."""
+    n = len(df)
+    # Per property: H-L difference in mean, H-L difference in std, product of means
+    n_feat = N_PROPERTIES * 3 + 4  # 5*3 + 4 extra
+    X = np.zeros((n, n_feat), dtype=np.float32)
+    for i, (_, row) in enumerate(df.iterrows()):
+        h_seq = [aa for aa in row["heavy_aligned_aho"] if aa != '-']
+        l_seq = [aa for aa in row["light_aligned_aho"] if aa != '-']
+        if not h_seq or not l_seq:
+            continue
+        for p, prop_dict in enumerate(PROPERTY_DICTS):
+            h_vals = [prop_dict.get(aa, 0.0) for aa in h_seq]
+            l_vals = [prop_dict.get(aa, 0.0) for aa in l_seq]
+            h_mean, l_mean = np.mean(h_vals), np.mean(l_vals)
+            h_std, l_std = np.std(h_vals), np.std(l_vals)
+            X[i, p * 3] = h_mean - l_mean
+            X[i, p * 3 + 1] = h_std - l_std
+            X[i, p * 3 + 2] = h_mean * l_mean
+        # Extra: total charge difference, length ratio, aromatic fraction diff
+        h_charge = sum(CHARGE.get(aa, 0) for aa in h_seq)
+        l_charge = sum(CHARGE.get(aa, 0) for aa in l_seq)
+        X[i, N_PROPERTIES * 3] = h_charge - l_charge
+        X[i, N_PROPERTIES * 3 + 1] = len(h_seq) / max(len(l_seq), 1)
+        h_arom = sum(1 for aa in h_seq if aa in 'FWY') / len(h_seq)
+        l_arom = sum(1 for aa in l_seq if aa in 'FWY') / len(l_seq)
+        X[i, N_PROPERTIES * 3 + 2] = h_arom - l_arom
+        X[i, N_PROPERTIES * 3 + 3] = h_arom * l_arom
+    return X
+
+
 def encode_summary_stats(df):
     n = len(df)
     n_stats = 2 * (N_PROPERTIES * 2 + 3)
@@ -192,7 +245,13 @@ def main():
         elif row['lc_subtype'] == 'Lambda': X_meta[i, 4] = 1
     print(f"  Metadata features: {X_meta.shape[1]}")
 
-    X_ridge = np.hstack([X_composition, X_summary, X_esm, X_meta])
+    X_dipeptide = encode_dipeptide(df)
+    print(f"  Dipeptide features: {X_dipeptide.shape[1]}")
+
+    X_interactions = encode_chain_interactions(df)
+    print(f"  Chain interaction features: {X_interactions.shape[1]}")
+
+    X_ridge = np.hstack([X_composition, X_summary, X_dipeptide, X_interactions, X_esm, X_meta])
     X_gbm = np.hstack([X_onehot, X_composition, X_summary, X_esm, X_meta])
     # Tm2-specific GBM features: add composition + physchem back (Tm2 is pure GBM)
     X_gbm_tm2 = np.hstack([X_onehot, X_physchem, X_composition, X_summary, X_esm, X_meta])
@@ -209,7 +268,7 @@ def main():
 
     lgb_params = {
         'objective': 'regression', 'metric': 'mse', 'verbosity': -1,
-        'n_estimators': 700, 'learning_rate': 0.04,
+        'n_estimators': 500, 'learning_rate': 0.05,
         'num_leaves': 15, 'min_child_samples': 10,
         'reg_alpha': 1.0, 'reg_lambda': 1.0,
         'subsample': 0.8, 'colsample_bytree': 0.8, 'max_depth': 4,
@@ -217,7 +276,7 @@ def main():
 
     xgb_params = {
         'objective': 'reg:squarederror', 'verbosity': 0,
-        'n_estimators': 700, 'learning_rate': 0.04,
+        'n_estimators': 500, 'learning_rate': 0.05,
         'max_depth': 4, 'min_child_weight': 10,
         'reg_alpha': 1.0, 'reg_lambda': 1.0,
         'subsample': 0.8, 'colsample_bytree': 0.8,
@@ -296,7 +355,7 @@ def main():
 
         # Per-target blend weights (Ridge stronger for HIC/PR_CHO, GBMs for Tm2/Titer)
         # Target order: HIC, Tm2, PR_CHO, AC-SINS_pH7.4, Titer
-        ridge_w = np.array([1.0, 0.0, 1.0, 0.6, 0.7])
+        ridge_w = np.array([1.0, 0.0, 1.0, 0.7, 0.8])
         gbm_w = (1.0 - ridge_w) / 2.0
         for j in range(n_targets):
             all_preds[val_idx, j] = (ridge_w[j] * ridge_preds[:, j] +
