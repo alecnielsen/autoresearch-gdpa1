@@ -121,6 +121,37 @@ def encode_dipeptide(df):
     return X
 
 
+def encode_chain_interactions(df):
+    """Cross-chain interaction features: differences and products of H/L chain properties."""
+    n = len(df)
+    # Per property: H-L difference in mean, H-L difference in std, product of means
+    n_feat = N_PROPERTIES * 3 + 4  # 5*3 + 4 extra
+    X = np.zeros((n, n_feat), dtype=np.float32)
+    for i, (_, row) in enumerate(df.iterrows()):
+        h_seq = [aa for aa in row["heavy_aligned_aho"] if aa != '-']
+        l_seq = [aa for aa in row["light_aligned_aho"] if aa != '-']
+        if not h_seq or not l_seq:
+            continue
+        for p, prop_dict in enumerate(PROPERTY_DICTS):
+            h_vals = [prop_dict.get(aa, 0.0) for aa in h_seq]
+            l_vals = [prop_dict.get(aa, 0.0) for aa in l_seq]
+            h_mean, l_mean = np.mean(h_vals), np.mean(l_vals)
+            h_std, l_std = np.std(h_vals), np.std(l_vals)
+            X[i, p * 3] = h_mean - l_mean
+            X[i, p * 3 + 1] = h_std - l_std
+            X[i, p * 3 + 2] = h_mean * l_mean
+        # Extra: total charge difference, length ratio, aromatic fraction diff
+        h_charge = sum(CHARGE.get(aa, 0) for aa in h_seq)
+        l_charge = sum(CHARGE.get(aa, 0) for aa in l_seq)
+        X[i, N_PROPERTIES * 3] = h_charge - l_charge
+        X[i, N_PROPERTIES * 3 + 1] = len(h_seq) / max(len(l_seq), 1)
+        h_arom = sum(1 for aa in h_seq if aa in 'FWY') / len(h_seq)
+        l_arom = sum(1 for aa in l_seq if aa in 'FWY') / len(l_seq)
+        X[i, N_PROPERTIES * 3 + 2] = h_arom - l_arom
+        X[i, N_PROPERTIES * 3 + 3] = h_arom * l_arom
+    return X
+
+
 def encode_summary_stats(df):
     n = len(df)
     n_stats = 2 * (N_PROPERTIES * 2 + 3)
@@ -217,7 +248,10 @@ def main():
     X_dipeptide = encode_dipeptide(df)
     print(f"  Dipeptide features: {X_dipeptide.shape[1]}")
 
-    X_ridge = np.hstack([X_composition, X_summary, X_dipeptide, X_esm, X_meta])
+    X_interactions = encode_chain_interactions(df)
+    print(f"  Chain interaction features: {X_interactions.shape[1]}")
+
+    X_ridge = np.hstack([X_composition, X_summary, X_dipeptide, X_interactions, X_esm, X_meta])
     X_gbm = np.hstack([X_onehot, X_composition, X_summary, X_esm, X_meta])
     # Tm2-specific GBM features: add composition + physchem back (Tm2 is pure GBM)
     X_gbm_tm2 = np.hstack([X_onehot, X_physchem, X_composition, X_summary, X_esm, X_meta])
