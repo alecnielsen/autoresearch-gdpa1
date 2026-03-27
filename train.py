@@ -443,9 +443,11 @@ def main():
                 y_std = 1.0
             y_tr_z = (y_tr - y_mean) / y_std
 
-            # Ridge on raw targets (handles its own regularization)
+            # Ridge on rank-transformed targets (aligned with Spearman metric)
+            from scipy.stats import rankdata
+            y_tr_rank = rankdata(y_tr).astype(np.float32)
             ridge = RidgeCV(alphas=alphas, scoring="neg_mean_squared_error")
-            ridge.fit(X_tr_s[mask], y_tr)
+            ridge.fit(X_tr_s[mask], y_tr_rank)
             ridge_preds[:, j] = ridge.predict(X_va_s)
 
             # Select GBM features (Tm2 gets enriched feature set)
