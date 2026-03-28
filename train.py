@@ -13,6 +13,7 @@ import torch
 from sklearn.linear_model import RidgeCV
 from sklearn.kernel_ridge import KernelRidge
 from sklearn.svm import SVR
+from sklearn.ensemble import RandomForestRegressor
 import lightgbm as lgb
 import xgboost as xgb
 
@@ -429,6 +430,7 @@ def main():
 
         ridge_preds = np.zeros((len(val_idx), n_targets), dtype=np.float32)
         svr_preds = np.zeros((len(val_idx), n_targets), dtype=np.float32)
+        rf_preds = np.zeros((len(val_idx), n_targets), dtype=np.float32)
         lgb_preds = np.zeros((len(val_idx), n_targets), dtype=np.float32)
         xgb_preds = np.zeros((len(val_idx), n_targets), dtype=np.float32)
 
@@ -463,6 +465,13 @@ def main():
             svr = SVR(kernel='rbf', C=1.0, gamma='scale')
             svr.fit(X_tr_s[mask], y_tr_rank)
             svr_preds[:, j] = svr.predict(X_va_s)
+
+            # Random Forest on rank targets (bagging diversity)
+            rf = RandomForestRegressor(n_estimators=200, max_depth=8,
+                                        min_samples_leaf=5, max_features=0.3,
+                                        random_state=42, n_jobs=-1)
+            rf.fit(X_tr_s[mask], y_tr_rank)
+            rf_preds[:, j] = rf.predict(X_va_s)
 
             # Select GBM features (Tm2 gets enriched feature set)
             X_gbm_j = X_gbm_tm2 if j == 1 else X_gbm
@@ -501,19 +510,20 @@ def main():
             xgb_preds[:, j] = 0.5 * (xgb_model1.predict(X_gbm_j[val_idx]) +
                                        xgb_model2.predict(X_gbm_j[val_idx])) * y_std + y_mean
 
-        # Per-target blend weights (Ridge stronger for HIC/PR_CHO, GBMs for Tm2/Titer)
-        # Target order: HIC, Tm2, PR_CHO, AC-SINS_pH7.4, Titer
-        # 4-model blend: Ridge, SVR, LGB, XGB
-        # SVR gets 15% of the Ridge allocation
+        # 5-model blend: Ridge, SVR, RF, LGB, XGB
         ridge_total = np.array([1.0, 0.0, 1.0, 0.7, 0.9])
         svr_w = ridge_total * 0.25
         ridge_w = ridge_total * 0.75
-        gbm_w = (1.0 - ridge_total) / 2.0
+        tree_total = 1.0 - ridge_total  # total weight for tree models
+        lgb_w = tree_total * 0.35
+        xgb_w = tree_total * 0.35
+        rf_w = tree_total * 0.30
         for j in range(n_targets):
             all_preds[val_idx, j] = (ridge_w[j] * ridge_preds[:, j] +
                                       svr_w[j] * svr_preds[:, j] +
-                                      gbm_w[j] * lgb_preds[:, j] +
-                                      gbm_w[j] * xgb_preds[:, j])
+                                      rf_w[j] * rf_preds[:, j] +
+                                      lgb_w[j] * lgb_preds[:, j] +
+                                      xgb_w[j] * xgb_preds[:, j])
 
     print()
 
