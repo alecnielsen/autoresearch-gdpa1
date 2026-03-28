@@ -506,8 +506,8 @@ def main():
         # 4-model blend: Ridge, SVR, LGB, XGB
         # SVR gets 15% of the Ridge allocation
         ridge_total = np.array([1.0, 0.0, 1.0, 0.7, 0.9])
-        svr_w = ridge_total * 0.15
-        ridge_w = ridge_total * 0.85
+        svr_w = ridge_total * 0.25
+        ridge_w = ridge_total * 0.75
         gbm_w = (1.0 - ridge_total) / 2.0
         for j in range(n_targets):
             all_preds[val_idx, j] = (ridge_w[j] * ridge_preds[:, j] +
