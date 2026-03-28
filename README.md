@@ -81,12 +81,12 @@ modal run modal_run.py
 
 ### Overall progression
 
-The agent ran **39 experiments across 3 sessions**, improving mean Spearman from **0.119 to 0.451** (3.8x improvement).
+The agent ran **41+ experiments across 3 sessions**, improving mean Spearman from **0.119 to 0.452** (3.8x improvement).
 
 | Session | Experiments | Start | End | Key breakthrough |
 |---|---|---|---|---|
 | `mar15` | 76 | 0.119 | 0.423 | ESM-2 embeddings, per-target specialization |
-| `mar23` | 39 | 0.421 | **0.451** | Rank-transformed Ridge, KernelRidge for Titer |
+| `mar23` | 41+ | 0.421 | **0.452** | Rank-transformed Ridge, KernelRidge for Titer, SVR ensemble |
 
 ### Key milestones
 
@@ -102,17 +102,18 @@ The agent ran **39 experiments across 3 sessions**, improving mean Spearman from
 | 0.430 | Dipeptide frequency features |
 | 0.434 | Codon usage, gap pattern, charge, hydrophobic patch features |
 | 0.449 | **Rank-transformed Ridge targets** (biggest single-experiment gain) |
-| **0.451** | **KernelRidge (RBF) for Titer prediction** |
+| 0.451 | KernelRidge (RBF) for Titer prediction |
+| **0.452** | **SVR (RBF) as 4th ensemble model** |
 
 ### Per-target breakdown (best model)
 
 | Target | Spearman | Strategy |
 |---|---|---|
-| PR_CHO | 0.561 | Pure rank Ridge |
-| HIC | 0.529 | Pure rank Ridge |
-| AC-SINS pH 7.4 | 0.487 | 70% rank Ridge / 30% GBM |
+| PR_CHO | 0.562 | 85% rank Ridge + 15% SVR |
+| HIC | 0.529 | 85% rank Ridge + 15% SVR |
+| AC-SINS pH 7.4 | 0.488 | 60% rank Ridge + 10% SVR + 15% LGB + 15% XGB |
 | Tm2 | 0.348 | Pure GBM (enriched features) |
-| Titer | 0.332 | 90% rank Ridge+KernelRidge / 10% GBM |
+| Titer | 0.334 | 63% rank Ridge+KernelRidge + 14% SVR + 12% GBM |
 
 ### Key findings
 
@@ -122,7 +123,8 @@ The agent ran **39 experiments across 3 sessions**, improving mean Spearman from
 - **Per-target specialization is essential.** Each target has its own optimal model mix. Tm2 needs pure GBMs with enriched features. HIC and PR_CHO are pure Ridge. AC-SINS and Titer benefit from Ridge-heavy blends with GBM diversity.
 - **KernelRidge captures nonlinear patterns that linear Ridge misses** — but only for Titer. Applying it to other targets hurt performance, suggesting Titer has uniquely nonlinear structure.
 - **DNA-level features (codon usage) help Ridge** but not GBMs, likely because codon bias correlates with expression (Titer) and GBMs already capture this signal from ESM embeddings.
-- **Feature engineering has diminishing returns.** Each new hand-crafted feature (dipeptide, charge patches, hydrophobic patches, gap patterns) added ~0.001 to the score. The big gains came from algorithmic changes (rank transform, KernelRidge).
+- **Model diversity matters more than individual model tuning.** Adding SVR as a 4th model type (alongside Ridge, LGB, XGB) improved scores even with a small weight (15%). Each model captures different patterns in the data.
+- **Feature engineering has diminishing returns.** Each new hand-crafted feature (dipeptide, charge patches, hydrophobic patches, gap patterns) added ~0.001 to the score. The big gains came from algorithmic changes (rank transform, KernelRidge, SVR).
 
 ## Running the agent
 
