@@ -12,6 +12,7 @@ import numpy as np
 import torch
 from sklearn.linear_model import RidgeCV
 from sklearn.kernel_ridge import KernelRidge
+from sklearn.svm import SVR
 import lightgbm as lgb
 import xgboost as xgb
 
@@ -427,6 +428,7 @@ def main():
         X_va_s = (X_ridge[val_idx] - mu) / std
 
         ridge_preds = np.zeros((len(val_idx), n_targets), dtype=np.float32)
+        svr_preds = np.zeros((len(val_idx), n_targets), dtype=np.float32)
         lgb_preds = np.zeros((len(val_idx), n_targets), dtype=np.float32)
         xgb_preds = np.zeros((len(val_idx), n_targets), dtype=np.float32)
 
@@ -456,6 +458,11 @@ def main():
                 kr = KernelRidge(alpha=1.0, kernel='rbf', gamma=1.0 / X_tr_s.shape[1])
                 kr.fit(X_tr_s[mask], y_tr_rank)
                 ridge_preds[:, j] = 0.7 * ridge_preds[:, j] + 0.3 * kr.predict(X_va_s)
+
+            # SVR on rank targets (complementary nonlinear model)
+            svr = SVR(kernel='rbf', C=1.0, gamma='scale')
+            svr.fit(X_tr_s[mask], y_tr_rank)
+            svr_preds[:, j] = svr.predict(X_va_s)
 
             # Select GBM features (Tm2 gets enriched feature set)
             X_gbm_j = X_gbm_tm2 if j == 1 else X_gbm
@@ -496,10 +503,15 @@ def main():
 
         # Per-target blend weights (Ridge stronger for HIC/PR_CHO, GBMs for Tm2/Titer)
         # Target order: HIC, Tm2, PR_CHO, AC-SINS_pH7.4, Titer
-        ridge_w = np.array([1.0, 0.0, 1.0, 0.7, 0.9])
-        gbm_w = (1.0 - ridge_w) / 2.0
+        # 4-model blend: Ridge, SVR, LGB, XGB
+        # SVR gets 15% of the Ridge allocation
+        ridge_total = np.array([1.0, 0.0, 1.0, 0.7, 0.9])
+        svr_w = ridge_total * 0.15
+        ridge_w = ridge_total * 0.85
+        gbm_w = (1.0 - ridge_total) / 2.0
         for j in range(n_targets):
             all_preds[val_idx, j] = (ridge_w[j] * ridge_preds[:, j] +
+                                      svr_w[j] * svr_preds[:, j] +
                                       gbm_w[j] * lgb_preds[:, j] +
                                       gbm_w[j] * xgb_preds[:, j])
 
