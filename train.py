@@ -13,7 +13,7 @@ import torch
 from sklearn.linear_model import RidgeCV
 from sklearn.kernel_ridge import KernelRidge
 from sklearn.svm import SVR
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import RandomForestRegressor, ExtraTreesRegressor
 import lightgbm as lgb
 import xgboost as xgb
 
@@ -431,6 +431,7 @@ def main():
         ridge_preds = np.zeros((len(val_idx), n_targets), dtype=np.float32)
         svr_preds = np.zeros((len(val_idx), n_targets), dtype=np.float32)
         rf_preds = np.zeros((len(val_idx), n_targets), dtype=np.float32)
+        et_preds = np.zeros((len(val_idx), n_targets), dtype=np.float32)
         lgb_preds = np.zeros((len(val_idx), n_targets), dtype=np.float32)
         xgb_preds = np.zeros((len(val_idx), n_targets), dtype=np.float32)
 
@@ -473,6 +474,13 @@ def main():
             rf.fit(X_tr_s[mask], y_tr_rank)
             rf_preds[:, j] = rf.predict(X_va_s)
 
+            # ExtraTrees on rank targets (even more randomized splits)
+            et = ExtraTreesRegressor(n_estimators=200, max_depth=10,
+                                      min_samples_leaf=3, max_features=0.5,
+                                      random_state=42, n_jobs=-1)
+            et.fit(X_tr_s[mask], y_tr_rank)
+            et_preds[:, j] = et.predict(X_va_s)
+
             # Select GBM features (Tm2 gets enriched feature set)
             X_gbm_j = X_gbm_tm2 if j == 1 else X_gbm
 
@@ -510,18 +518,20 @@ def main():
             xgb_preds[:, j] = 0.5 * (xgb_model1.predict(X_gbm_j[val_idx]) +
                                        xgb_model2.predict(X_gbm_j[val_idx])) * y_std + y_mean
 
-        # 5-model blend: Ridge, SVR, RF, LGB, XGB
+        # 6-model blend: Ridge, SVR, RF, ExtraTrees, LGB, XGB
         ridge_total = np.array([1.0, 0.0, 1.0, 0.7, 0.9])
         svr_w = ridge_total * 0.25
         ridge_w = ridge_total * 0.75
-        tree_total = 1.0 - ridge_total  # total weight for tree models
-        lgb_w = tree_total * 0.35
-        xgb_w = tree_total * 0.35
-        rf_w = tree_total * 0.30
+        tree_total = 1.0 - ridge_total
+        lgb_w = tree_total * 0.25
+        xgb_w = tree_total * 0.25
+        rf_w = tree_total * 0.25
+        et_w = tree_total * 0.25
         for j in range(n_targets):
             all_preds[val_idx, j] = (ridge_w[j] * ridge_preds[:, j] +
                                       svr_w[j] * svr_preds[:, j] +
                                       rf_w[j] * rf_preds[:, j] +
+                                      et_w[j] * et_preds[:, j] +
                                       lgb_w[j] * lgb_preds[:, j] +
                                       xgb_w[j] * xgb_preds[:, j])
 
