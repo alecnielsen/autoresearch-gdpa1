@@ -14,6 +14,9 @@ from sklearn.linear_model import RidgeCV
 from sklearn.kernel_ridge import KernelRidge
 from sklearn.svm import SVR
 from sklearn.ensemble import RandomForestRegressor, ExtraTreesRegressor
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import RBF, WhiteKernel, ConstantKernel
+from sklearn.decomposition import PCA
 import lightgbm as lgb
 import xgboost as xgb
 
@@ -538,13 +541,30 @@ def main():
                                       lgb_share * lgb_preds[:, j] +
                                       xgb_share * xgb_preds[:, j])
 
-    # KNN smoothing for Tm2 only (benefits from local ESM structure)
+    # GP + KNN post-processing for Tm2
+    tm2_idx = 1
+    print("GP regression for Tm2 on PCA'd ESM...")
+    # PCA reduce ESM for GP (GP can't handle 5120 dims efficiently)
+    pca_gp = PCA(n_components=30)
+    X_esm_pca = pca_gp.fit_transform(X_esm)
+
+    # Train GP on all samples with non-NaN Tm2 using OOF predictions as targets
+    # This learns a smooth mapping from ESM space to Tm2 rank
+    tm2_mask = ~np.isnan(Y[:, tm2_idx])
+    kernel = ConstantKernel(1.0) * RBF(length_scale=5.0) + WhiteKernel(noise_level=0.5)
+    gp = GaussianProcessRegressor(kernel=kernel, n_restarts_optimizer=3, alpha=0.1)
+    gp.fit(X_esm_pca[tm2_mask], all_preds[tm2_mask, tm2_idx])
+    gp_tm2 = gp.predict(X_esm_pca)
+
+    # Blend GP with ensemble: 85% ensemble + 15% GP
+    all_preds[:, tm2_idx] = 0.85 * all_preds[:, tm2_idx] + 0.15 * gp_tm2
+
+    # KNN smoothing for Tm2 (on top of GP blend)
     from sklearn.neighbors import NearestNeighbors
     print("KNN smoothing Tm2 predictions...")
     knn = NearestNeighbors(n_neighbors=6, metric='cosine')
     knn.fit(X_esm)
     distances, indices = knn.kneighbors(X_esm)
-    tm2_idx = 1  # Tm2 is target index 1
     for i in range(len(all_preds)):
         neighbor_preds = all_preds[indices[i, 1:], tm2_idx]
         valid = ~np.isnan(neighbor_preds)
