@@ -81,12 +81,12 @@ modal run modal_run.py
 
 ### Overall progression
 
-The agent ran **41+ experiments across 3 sessions**, improving mean Spearman from **0.119 to 0.452** (3.8x improvement).
+The agent ran **62 experiments across multiple sessions**, improving mean Spearman from **0.119 to 0.468** (3.9x improvement).
 
 | Session | Experiments | Start | End | Key breakthrough |
 |---|---|---|---|---|
 | `mar15` | 76 | 0.119 | 0.423 | ESM-2 embeddings, per-target specialization |
-| `mar23` | 41+ | 0.421 | **0.452** | Rank-transformed Ridge, KernelRidge for Titer, SVR ensemble |
+| `mar23` | 62 | 0.421 | **0.468** | Rank Ridge, RF/ExtraTrees, GP regression, KNN smoothing |
 
 ### Key milestones
 
@@ -99,32 +99,51 @@ The agent ran **41+ experiments across 3 sessions**, improving mean Spearman fro
 | 0.375 | Full HC/LC chain embeddings + XGBoost |
 | 0.404 | Feature selection: drop noisy features per model |
 | 0.423 | Per-target blend weights + GBM specialization |
-| 0.430 | Dipeptide frequency features |
 | 0.434 | Codon usage, gap pattern, charge, hydrophobic patch features |
-| 0.449 | **Rank-transformed Ridge targets** (biggest single-experiment gain) |
-| 0.451 | KernelRidge (RBF) for Titer prediction |
-| **0.452** | **SVR (RBF) as 4th ensemble model** |
+| 0.449 | Rank-transformed Ridge targets |
+| 0.452 | SVR (RBF) as 4th ensemble model |
+| 0.456 | Random Forest as 5th model — Tm2 breakthrough |
+| 0.458 | ExtraTrees as 6th model + GBM features for RF/ET |
+| 0.462 | Per-target tree allocation (RF/ET vs GBM) |
+| 0.465 | KNN smoothing for Tm2 in ESM cosine space |
+| **0.468** | **Gaussian Process regression for Tm2 on PCA'd ESM** |
 
 ### Per-target breakdown (best model)
 
 | Target | Spearman | Strategy |
 |---|---|---|
-| PR_CHO | 0.562 | 85% rank Ridge + 15% SVR |
-| HIC | 0.529 | 85% rank Ridge + 15% SVR |
-| AC-SINS pH 7.4 | 0.488 | 60% rank Ridge + 10% SVR + 15% LGB + 15% XGB |
-| Tm2 | 0.348 | Pure GBM (enriched features) |
-| Titer | 0.334 | 63% rank Ridge+KernelRidge + 14% SVR + 12% GBM |
+| PR_CHO | 0.562 | 75% rank Ridge + 25% SVR |
+| HIC | 0.530 | 75% rank Ridge + 25% SVR |
+| Tm2 | 0.433 | Tree ensemble (RF + ET + LGB + XGB) + GP smoothing + KNN smoothing |
+| AC-SINS pH 7.4 | 0.483 | 53% Ridge+SVR + 10% RF/ET + 21% LGB/XGB |
+| Titer | 0.331 | 68% rank Ridge+KernelRidge + 22% SVR + 5% trees |
+
+### The model
+
+A 6-model ensemble with per-target specialization:
+
+1. **Ridge** (rank-transformed targets) — linear baseline, dominates for HIC/PR_CHO
+2. **KernelRidge** (RBF) — nonlinear Ridge, Titer-specific
+3. **SVR** (RBF, rank targets) — complementary nonlinear model
+4. **LightGBM** (2 configs) — gradient boosting with z-scored targets
+5. **XGBoost** (2 configs) — gradient boosting diversity
+6. **Random Forest** (rank targets, GBM features) — bagging diversity, Tm2 breakthrough
+7. **ExtraTrees** (rank targets, GBM features) — extreme randomization
+
+Post-processing:
+- **Gaussian Process** on PCA'd ESM embeddings smooths Tm2 predictions (15% blend)
+- **KNN smoothing** in ESM cosine space further refines Tm2 (25% neighbor blend)
 
 ### Key findings
 
-- **ESM-2 embeddings were the single biggest win.** Going from hand-crafted features to frozen ESM-2 650M embeddings roughly doubled performance (0.151 → 0.284). Including full-length heavy/light chain embeddings (not just variable regions) pushed it further to 0.375.
+- **ESM-2 embeddings were the single biggest win.** Going from hand-crafted features to frozen ESM-2 650M embeddings roughly doubled performance (0.151 → 0.284). Including full-length heavy/light chain embeddings pushed it further to 0.375.
 - **Classical ML > neural nets for this dataset size.** Ridge + gradient boosting ensembles beat the MLP baseline. Fine-tuning ESM-2 directly on 246 samples caused overfitting.
-- **Rank-transforming Ridge targets was the second biggest win.** Since Spearman measures rank correlation, training Ridge on ranks directly aligns the objective. This single change boosted mean Spearman from 0.434 to 0.449, with AC-SINS improving by +0.055.
-- **Per-target specialization is essential.** Each target has its own optimal model mix. Tm2 needs pure GBMs with enriched features. HIC and PR_CHO are pure Ridge. AC-SINS and Titer benefit from Ridge-heavy blends with GBM diversity.
-- **KernelRidge captures nonlinear patterns that linear Ridge misses** — but only for Titer. Applying it to other targets hurt performance, suggesting Titer has uniquely nonlinear structure.
-- **DNA-level features (codon usage) help Ridge** but not GBMs, likely because codon bias correlates with expression (Titer) and GBMs already capture this signal from ESM embeddings.
-- **Model diversity matters more than individual model tuning.** Adding SVR as a 4th model type (alongside Ridge, LGB, XGB) improved scores even with a small weight (15%). Each model captures different patterns in the data.
-- **Feature engineering has diminishing returns.** Each new hand-crafted feature (dipeptide, charge patches, hydrophobic patches, gap patterns) added ~0.001 to the score. The big gains came from algorithmic changes (rank transform, KernelRidge, SVR).
+- **Rank-transforming Ridge targets was the second biggest win.** Since Spearman measures rank correlation, training Ridge on ranks directly aligns the objective (+0.015 mean Spearman).
+- **Model diversity is the key late-game strategy.** Adding RF, ExtraTrees, SVR, and KernelRidge as ensemble members each contributed small but consistent gains. The 6-model ensemble outperforms any single model type.
+- **Per-target specialization is essential.** Each target has its own optimal model mix. Tm2 needs pure tree ensembles. HIC and PR_CHO are pure Ridge. AC-SINS and Titer benefit from Ridge-heavy blends.
+- **Gaussian Process regression captures smooth ESM-space structure** that tree models miss. GP on 30 PCA'd ESM dimensions improved Tm2 from 0.419 to 0.433 — the biggest single-target gain.
+- **KNN smoothing in ESM cosine space** acts as a denoiser for Tm2 predictions. Antibodies with similar ESM embeddings have similar thermal stability.
+- **RF/ExtraTrees on GBM features (one-hot + ESM)** was a breakthrough for Tm2 — trees handle sparse features better than the Ridge feature set. This took Tm2 from 0.348 to 0.398.
 
 ## Running the agent
 
